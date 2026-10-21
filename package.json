@@ -1,0 +1,52 @@
+{
+  "name": "@local/dsh-peer-link",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Link DeepSeek Harness instances on the LAN: delegate subagents to another machine's DSH and continue its sessions.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FxRayHughes/dsh-peer-link.git"
+  },
+  "homepage": "https://github.com/FxRayHughes/dsh-peer-link",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "web.js",
+    "client.js",
+    "server.js",
+    "provider.js",
+    "discovery.js",
+    "peer-client.js",
+    "protocol.js",
+    "state.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node test-protocol.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  }
+}

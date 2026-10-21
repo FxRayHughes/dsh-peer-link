@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH Peer Link",
+    "description": "Use another machine's DSH on the LAN as a subagent: subagent_peer delegates to a full remote agent; peer_dsh pairs peers and continues, reads, or cancels remote sessions. Pairing code: ~/.dsh/peer-link/pairing-code.txt."
+  }
+}

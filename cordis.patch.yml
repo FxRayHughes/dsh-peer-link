@@ -1,0 +1,21 @@
+# Registers the peer-link Host plugin and a delegation tool over its provider.
+#
+# `peer-link` listens on a random free LAN port that peers find through signed
+# UDP discovery (udp/47788, shared bind), registers the `peer` subagent
+# provider, and adds the `peer_dsh` tool. Pairing secrets live in
+# ~/.dsh/peer-link/state.json, never in this file or the profile patch.
+#
+# `tool-subagent-peer` mounts the stock delegation tool over that provider as
+# `subagent_peer`: the remote DSH runs a complete agent and its final answer
+# arrives as the usual completion notice. Recursion is left to the remote side.
+- insert:
+    - id: peer-link
+      name: '@local/dsh-peer-link'
+      config: {}
+
+    - id: tool-subagent-peer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: peer
+        toolName: subagent_peer
+        maxDepth: provider-managed
