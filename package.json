@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-peer-link",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Link DeepSeek Harness instances on the LAN: delegate subagents to another machine's DSH and continue its sessions.",
   "repository": {
@@ -30,6 +30,7 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
+    "skills/",
     "README.md"
   ],
   "dsh": {

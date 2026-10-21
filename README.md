@@ -25,6 +25,15 @@
 - 子代理与对端会话的对应关系保存在 `~/.dsh/peer-link/links.json`，重启后仍能续接。
 - 在本机界面里可以打开子代理会话查看往来记录，也可以直接在里面输入，输入的内容同样转给对端。
 
+## 配套 skill
+
+[`skills/dsh-peer-link/SKILL.md`](skills/dsh-peer-link/SKILL.md) 教 agent 什么时候、怎么用这两个工具：选哪个工具，怎么写委派任务，怎么续接、回答对端提问，以及常见错误怎么处理。插件本身不加载它；把整个 `dsh-peer-link` 目录放进 skill 目录即可，例如 `~/.agents/skills/`（多个 agent 共用）或 `~/.dsh/skills/`（只给 DSH 用）。
+
+```sh
+mkdir -p ~/.agents/skills
+cp -R skills/dsh-peer-link ~/.agents/skills/
+```
+
 ## 怎么找到对端（发现协议）
 
 HTTP 端口每次启动都可能变化，所以对端地址只是缓存。调用对端时依次尝试：
