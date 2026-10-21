@@ -121,6 +121,7 @@ export class PeerState {
         data = {
           secret: typeof parsed.secret === 'string' ? parsed.secret : '',
           lastPort: parsed.lastPort,
+          ...(typeof parsed.accessDecision === 'string' ? { accessDecision: parsed.accessDecision } : {}),
           peers: Array.isArray(parsed.peers) ? parsed.peers.map(cleanPeer).filter(Boolean) : [],
         };
       } catch {
@@ -157,6 +158,21 @@ export class PeerState {
     this.load();
     if (this.data.lastPort === port) return;
     this.data.lastPort = port;
+    this.save();
+  }
+
+  /**
+   * The user's answer to the full-access prompt shown after installation:
+   * `granted`, `declined`, or undefined while unanswered.
+   */
+  get accessDecision() {
+    return this.load().accessDecision;
+  }
+
+  set accessDecision(decision) {
+    this.load();
+    if (this.data.accessDecision === decision) return;
+    this.data.accessDecision = decision;
     this.save();
   }
 

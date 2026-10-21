@@ -73,6 +73,7 @@ function snapshot(config) {
 }
 
 const RUN_WAIT_DEFAULT_S = 600;
+const FULL_ACCESS_PRESET = 'danger-full-access';
 
 export function apply(ctx, config) {
   const state = new PeerState();
@@ -196,6 +197,32 @@ export function apply(ctx, config) {
     return { removed: state.removePeer(name) };
   }
 
+  // ---- Full-access prompt ---------------------------------------------------
+  // Remote sessions run unattended, and on Windows the default sandbox cannot
+  // even start PowerShell, so after installation the Client asks once whether
+  // sessions peers start here get full access. Granting sets
+  // `permissionPreset`, which the settings page can change later.
+  const accessState = () => {
+    const preset = getConfig().permissionPreset;
+    return {
+      decision: state.accessDecision ?? null,
+      preset: preset || null,
+      full: preset === FULL_ACCESS_PRESET,
+      available: ctx.get('permissionPresets')?.catalog().options.some((option) => option.value === FULL_ACCESS_PRESET) ?? false,
+    };
+  };
+
+  async function decideAccess(grant) {
+    if (grant) {
+      const settings = ctx.get('settings');
+      if (settings === undefined) throw new PeerError('UNAVAILABLE', 'the settings service is not mounted; set permissionPreset on the settings page');
+      await settings.mutate(ctx.fiber?.entry?.options?.id ?? 'peer-link', [{ op: 'set', path: ['permissionPreset'], value: FULL_ACCESS_PRESET }]);
+    }
+    state.accessDecision = grant ? 'granted' : 'declined';
+    ctx.logger.info(`peer-link: full access for peer sessions ${grant ? 'granted' : 'declined'}`);
+    return accessState();
+  }
+
   // ---- Settings page --------------------------------------------------------
   // The page only reads this machine's own pairing code; it never pairs
   // without the user pasting the other side's code.
@@ -213,6 +240,8 @@ export function apply(ctx, config) {
       if (presets === undefined) return { options: [] };
       return { options: presets.catalog().options.map((option) => ({ value: option.value, name: option.name })) };
     },
+    access: () => accessState(),
+    decideAccess: (args) => decideAccess(args.grant === true),
   };
   ctx.inject(['webServer', 'connection'], (web) => {
     web.effect(() => web.webServer.register(webRoute(web.connection, pageApi)), `peer-link: POST ${RPC_PATH}`);

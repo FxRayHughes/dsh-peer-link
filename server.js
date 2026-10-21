@@ -233,8 +233,10 @@ export class SessionOps {
 
   /**
    * Progress of one prompt. With `requestId`, only the turn that admitted that
-   * prompt counts, so a turn already running when it was queued cannot end the
-   * run early; `startSeq` alone covers prompts sent by older peers.
+   * prompt counts: a turn already running when it was queued cannot end the
+   * run early, and a later turn woken by something else (a permission change
+   * notice, a local prompt) cannot replace its reply. `startSeq` alone covers
+   * prompts sent by older peers.
    */
   async status(args) {
     const sessionId = String(args?.sessionId ?? '');
@@ -264,12 +266,15 @@ export class SessionOps {
       } else if (event.type === 'turn/end') {
         turnEnd = event.data?.reason;
         if (turnEnd?.kind === 'error') errorText = turnEnd.error?.message ?? 'turn failed';
+        if (requestId !== undefined) break;
       } else if (event.type === 'tool/call') {
         lastActivity = event.time;
       }
     }
     const pending = agent === undefined ? 0 : (agent.inbox?.nextTurn?.length ?? 0) + (agent.inbox?.nextStep?.length ?? 0);
     const running = agent !== undefined && (agent.status === 'running' || pending > 0);
+    // The admitting turn's end settles a tracked request even if the Session went on to another turn.
+    const done = turnEnd !== undefined && (requestId !== undefined || !running);
     const session = agent?.session ?? this.ctx.get('sessions')?.get(sessionId);
     const questionView = session === undefined ? undefined : this.ctx.get('sessionProjections')?.stateOf(session, 'userQuestions');
     const questions = (questionView?.questions?.active ?? []).map((item) => ({
@@ -277,7 +282,6 @@ export class SessionOps {
       state: item.state,
       questions: item.questions,
     }));
-    const done = !running && turnEnd !== undefined;
     return {
       sessionId,
       running,

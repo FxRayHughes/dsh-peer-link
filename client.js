@@ -68,6 +68,15 @@ window.__ModuleLoader__.load({
       failed: '保存被拒绝',
       reset: '还原',
       readOnly: '此配置为只读（被更高层的配置覆盖）。',
+      accessTitle: '允许对端会话完全访问本机？',
+      accessBody:
+        '已配对的机器发来的任务在本机新开会话、无人值守地执行。默认沙箱下需要审批的操作会卡住；在 Windows 上，默认沙箱甚至无法启动 PowerShell。',
+      accessRisk: '允许后，这些会话使用 danger-full-access：不受沙箱限制、不经审批，可以读写任意文件、执行任意命令。只与自己信任的设备配对。',
+      accessLater: '之后可以在 设置 → 插件 → DSH 互联 →「对端会话的权限预设」中修改。',
+      accessGrant: '允许完全访问',
+      accessDecline: '暂不',
+      accessWorking: '正在保存…',
+      accessUnavailable: '本机没有 danger-full-access 预设，无法授权。',
       invalidPort: '须为 0–65535 的整数',
       invalidDiscoveryPort: '须为 1–65535 的整数',
       error: '出错：{message}',
@@ -134,6 +143,15 @@ window.__ModuleLoader__.load({
       failed: 'Save refused',
       reset: 'Reset',
       readOnly: 'This configuration is read-only (overridden by a higher layer).',
+      accessTitle: 'Give peer sessions full access to this machine?',
+      accessBody:
+        'Tasks from paired machines run here in new sessions with nobody watching. Under the default sandbox, anything that needs approval stalls; on Windows the default sandbox cannot even start PowerShell.',
+      accessRisk: 'If you allow it, those sessions use danger-full-access: no sandbox and no approvals, so they can read and write any file and run any command. Pair only with devices you trust.',
+      accessLater: 'You can change this later under Settings → Plugins → DSH peer link → "Permission preset for peer sessions".',
+      accessGrant: 'Allow full access',
+      accessDecline: 'Not now',
+      accessWorking: 'Saving…',
+      accessUnavailable: 'This machine has no danger-full-access preset to grant.',
       invalidPort: 'Must be a whole number from 0 to 65535',
       invalidDiscoveryPort: 'Must be a whole number from 1 to 65535',
       error: 'Error: {message}',
@@ -215,6 +233,12 @@ window.__ModuleLoader__.load({
 .pl-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .pl-note.ok{color:var(--dsw-alias-state-success-primary)}
 .pl-note.err{color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
+.pl-scrim{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.32)}
+.pl-dialog{box-sizing:border-box;width:min(440px,100%);display:flex;flex-direction:column;gap:12px;padding:20px;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 12px 40px rgba(0,0,0,.24)}
+.pl-dialog h2{margin:0;font-size:16px;font-weight:600;line-height:24px}
+.pl-dialog p{margin:0;font-size:13px;line-height:20px}
+.pl-dialog .pl-risk{padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-state-error-primary)}
+.pl-dialog .pl-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 @media (max-width:640px){.pl-row{flex-direction:column;align-items:stretch;gap:8px}.pl-control{flex-basis:auto}.pl-value{text-align:left}}
 `;
 
@@ -660,6 +684,62 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Asks once, after the plugin is enabled, whether sessions that peers start
+     * here may use full access. The Host records the answer, so the prompt does
+     * not return on other windows or after a restart.
+     */
+    function AccessPrompt({ t }) {
+      const [access, setAccess] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+      useEffect(() => {
+        let live = true;
+        rpc('access')
+          .then((value) => live && setAccess(value))
+          .catch(() => undefined);
+        return () => {
+          live = false;
+        };
+      }, []);
+      if (access === null || access.decision !== null || access.full) return null;
+      const decide = async (grant) => {
+        setBusy(true);
+        setError(null);
+        try {
+          setAccess(await rpc('decideAccess', { grant }));
+        } catch (cause) {
+          setError(cause.message);
+          setBusy(false);
+        }
+      };
+      return h(
+        'div',
+        { className: 'pl-scrim' },
+        h('style', null, CSS),
+        h(
+          'div',
+          { className: 'pl-dialog', role: 'alertdialog', 'aria-modal': true, 'aria-labelledby': 'pl-access-title' },
+          h('h2', { id: 'pl-access-title' }, t('accessTitle')),
+          h('p', null, t('accessBody')),
+          h('p', { className: 'pl-risk' }, t('accessRisk')),
+          h('p', { className: 'pl-hint' }, t('accessLater')),
+          access.available ? null : h('p', { className: 'pl-note err' }, t('accessUnavailable')),
+          error ? h('p', { className: 'pl-note err', role: 'status' }, error) : null,
+          h(
+            'div',
+            { className: 'pl-actions' },
+            h('button', { type: 'button', className: 'pl-btn', disabled: busy, onClick: () => decide(false) }, t('accessDecline')),
+            h(
+              'button',
+              { type: 'button', className: 'pl-btn primary', disabled: busy || !access.available, onClick: () => decide(true) },
+              busy ? t('accessWorking') : t('accessGrant'),
+            ),
+          ),
+        ),
+      );
+    }
+
     function PeerLinkPage({ t, form }) {
       const [data, reload] = usePeers();
       const [presets, setPresets] = useState([]);
@@ -687,6 +767,7 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'locale'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'peer-link: locale');
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'peer-link.access', locale: NS }, AccessPrompt));
         ctx.slots.inject('plugins.row.config', () =>
           ctx.slots.register({ name: 'plugins.row.config', key: ROW_KEY, locale: NS }, (props) =>
             props.view === 'summary' ? props.t('summary') : h(PeerLinkPage, props),

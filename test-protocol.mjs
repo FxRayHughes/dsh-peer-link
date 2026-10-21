@@ -271,6 +271,17 @@ assert.deepEqual(answered[0], { callId: 'q1', answer: { answers: [{ id: 'a', sel
 delete services.userQuestions;
 delete services.sessionProjections;
 
+// A later turn woken by something else does not replace a tracked request's reply.
+const tracked = await ops.run({ prompt: 'tracked', sessionId: 's1', from: 'client' });
+await new Promise((resolve) => setTimeout(resolve, 300));
+agent.status = 'running';
+push('user/message', { source: { kind: 'permission-notice' }, content: [{ type: 'text', text: 'policy changed' }] });
+push('assistant/message', { message: { content: [{ type: 'text', text: 'noted the policy change' }] } });
+const trackedStatus = await ops.status({ sessionId: 's1', startSeq: tracked.startSeq, requestId: tracked.requestId });
+assert.equal(trackedStatus.done, true, 'the admitting turn settles the request while a later turn runs');
+assert.equal(trackedStatus.finalText, 'reply:tracked');
+agent.status = 'idle';
+
 // The mapping survives a restart.
 assert.equal(new LinkStore(join(process.env.HOME, 'links.json')).get(child.id).remote, 's1');
 
