@@ -176,7 +176,16 @@ export class SessionOps {
     }
     const agent = await this.resolveAgent(sessionId);
     const startSeq = Number(agent.session.seq);
+    if (!created && args?.answerQuestions === true) {
+      const answered = this.answerContinued(agent, prompt);
+      if (answered > 0) {
+        this.ctx.logger.info(`peer-link: ${from} answered ${answered} question(s) in session ${sessionId}`);
+        return { sessionId, startSeq, created, answered, cwd: agent.session.header?.cwd };
+      }
+    }
     const requestId = randomUUID();
+    // Steering joins a turn that is still running; an idle Session takes a new turn either way.
+    const mode = args?.mode === 'steer' && agent.status === 'running' ? 'steer' : 'queue';
     const preface = this.getConfig().delegationNote
       ? `[Delegated from peer DSH "${from}" via peer-link. No human is watching this session: do not wait for answers, make reasonable decisions yourself, and end with a concise report of what you did and the results.]\n\n`
       : `[Delegated from peer DSH "${from}"]\n\n`;
@@ -184,13 +193,36 @@ export class SessionOps {
       {
         requestId,
         sessionId,
-        mode: 'queue',
+        mode,
         content: [{ type: 'text', text: (created || args?.preface ? preface : `[From peer DSH "${from}"]\n\n`) + prompt }],
       },
       signal ?? new AbortController().signal,
     );
-    this.ctx.logger.info(`peer-link: ${from} ${created ? 'started' : 'prompted'} session ${sessionId}`);
-    return { sessionId, startSeq, requestId, created, cwd: agent.session.header?.cwd };
+    this.ctx.logger.info(`peer-link: ${from} ${created ? 'started' : mode === 'steer' ? 'steered' : 'prompted'} session ${sessionId}`);
+    return { sessionId, startSeq, requestId, created, mode, cwd: agent.session.header?.cwd };
+  }
+
+  /**
+   * Answer every question the remote agent left pending (its ask_user_question
+   * returned without an answer) with the caller's text. The reply is steered
+   * into the agent by the user-questions service, which wakes an idle Session.
+   * @returns how many question calls were answered.
+   */
+  answerContinued(agent, text) {
+    const service = this.ctx.get('userQuestions');
+    const view = this.ctx.get('sessionProjections')?.stateOf(agent.session, 'userQuestions');
+    const continued = (view?.questions?.active ?? []).filter((item) => item.state === 'continued');
+    if (service === undefined || continued.length === 0) return 0;
+    let answered = 0;
+    for (const item of continued) {
+      try {
+        const answers = item.questions.map((question) => ({ id: question.id, selected: [], custom: text }));
+        if (service.answer(agent, item.callId, { answers })) answered += 1;
+      } catch (error) {
+        this.ctx.logger.warn(`peer-link: cannot answer question ${item.callId}: ${error.message}`);
+      }
+    }
+    return answered;
   }
 
   events(sessionId) {

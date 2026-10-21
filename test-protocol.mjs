@@ -1,5 +1,6 @@
 // Offline checks: signing, replay rejection, pairing codes, discovery, and
-// provider runs against a fake sessionController over real loopback sockets.
+// the peer-link model route against a fake sessionController over real
+// loopback sockets.
 // Run with: node test-protocol.mjs   (uses a temporary HOME)
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
@@ -12,7 +13,9 @@ process.env.USERPROFILE = process.env.HOME;
 const { NonceCache, newSecret, signedHeaders, verify, PeerError } = await import('./protocol.js');
 const { decodeCode, encodeCode, PeerState } = await import('./state.js');
 const { SessionOps, startServer } = await import('./server.js');
-const { PeerSubagentProvider } = await import('./provider.js');
+const { followRun } = await import('./provider.js');
+const { PeerModelAdapter } = await import('./peer-model.js');
+const { LinkStore } = await import('./links.js');
 const { PeerClient } = await import('./peer-client.js');
 const { Discovery, keyIdOf } = await import('./discovery.js');
 const http = await import('node:http');
@@ -97,10 +100,8 @@ assert.deepEqual(await discovery.find({ name: 'x', hints: ['127.0.0.1'], secret:
 assert.notEqual(keyIdOf(secret), keyIdOf(newSecret()));
 
 const clientFor = (name) => new PeerClient(clientState, clientState.peer(name), logger, discovery);
-const provider = new PeerSubagentProvider({ name: 'peer', getConfig: () => ({ displayName: 'client', remoteCwd: '', subagentPeer: '' }), clientFor, logger });
-const run = await provider.start({ prompt: [{ type: 'text', text: 'ping' }], label: 'test', cwd: '/tmp', signal: new AbortController().signal });
-const result = await run.result;
-await run.dispose();
+const started = await clientFor('loop').call('run', { prompt: 'ping', from: 'client', preface: true });
+const result = await followRun(clientFor('loop'), started, new AbortController().signal);
 assert.equal(result.stopReason, 'completed');
 assert.match(result.output[0].text, /pong from fake/);
 assert.match(result.output[0].text, /remote session s1/);
@@ -131,24 +132,147 @@ const late = await ops.status({ sessionId: 's1', startSeq: queued.startSeq, requ
 assert.equal(late.done, true);
 assert.equal(late.finalText, 'pong from fake');
 
-// Aborting the parent cancels the remote turn and settles as aborted.
-let cancelled = 0;
-fakeController.cancel = () => {
-  cancelled += 1;
-  return { accepted: true };
+// --- peer-link model route -------------------------------------------------
+// A scripted remote: each prompt runs one turn that replies `reply:<text>`
+// after `turnMs`, unless `hold` keeps it running until released.
+let msgId = 0;
+const userMsg = (text, kind = 'user') => ({ id: `m${++msgId}`, role: 'user', content: [{ type: 'text', text }], source: { kind } });
+const assistantMsg = (text) => ({ id: `m${++msgId}`, role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model' } });
+const remote = { prompts: [], hold: false, turnMs: 150, current: undefined, cancels: 0 };
+const finishTurn = () => {
+  const turn = remote.current;
+  if (turn === undefined) return;
+  remote.current = undefined;
+  push('assistant/message', { message: { content: [{ type: 'text', text: `reply:${turn.texts.join('+')}` }] } });
+  push('turn/end', { reason: { kind: turn.cancelled ? 'aborted' : 'completed' } });
+  agent.status = 'idle';
 };
-fakeController.prompt = async () => {
+fakeController.prompt = async (request) => {
+  const text = request.content[0].text.replace(/^\[[^\]]*\]\n\n/, '');
+  remote.prompts.push({ text, mode: request.mode });
+  if (request.mode === 'steer' && remote.current !== undefined) {
+    remote.current.texts.push(text);
+    push('user/message', { source: { kind: 'user', rpcId: request.requestId }, content: request.content });
+    return { accepted: true };
+  }
   agent.status = 'running';
+  remote.current = { texts: [text] };
+  push('user/message', { source: { kind: 'user', rpcId: request.requestId }, content: request.content });
+  if (!remote.hold) setTimeout(finishTurn, remote.turnMs);
   return { accepted: true };
 };
-const abort = new AbortController();
-const hung = await provider.start({ prompt: [{ type: 'text', text: 'hang' }], label: 'abort', cwd: '/tmp', signal: abort.signal });
-abort.abort();
-const aborted = await hung.result;
-await hung.dispose();
+fakeController.cancel = () => {
+  remote.cancels += 1;
+  if (remote.current) remote.current.cancelled = true;
+  finishTurn();
+  return { accepted: true };
+};
+events.length = 0;
+seq = 0;
+
+const links = new LinkStore(join(process.env.HOME, 'links.json'));
+const childAgents = new Map();
+const routeCtx = { get: (key) => (key === 'agents' ? { get: (id) => childAgents.get(id) } : undefined), logger };
+const adapter = new PeerModelAdapter({
+  getConfig: () => ({ displayName: 'client', remoteCwd: '', subagentPeer: '' }),
+  clientFor,
+  listPeerNames: () => ['loop'],
+  links,
+  ctx: routeCtx,
+});
+const child = { id: 'child-1', inbox: { nextStep: [] }, session: { header: { cwd: '/tmp' }, snapshotEvents: () => [{ type: 'subagent/descriptor', data: { label: 'probe' } }] } };
+childAgents.set(child.id, child);
+
+async function collect(messages, signal = new AbortController().signal) {
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: 'peer-link', model: 'auto', sessionId: child.id, messages, signal })) chunks.push(chunk);
+  const text = (type) => chunks.filter((c) => c.type === 'block-end' && c.block.type === type).map((c) => c.block.text).join('\n');
+  return { chunks, text: text('text'), reasoning: text('reasoning'), finish: chunks.at(-1) };
+}
+
+assert.equal((await adapter.listModels('peer-link')).map((m) => m.id).join(), 'auto,loop');
+assert.equal((await adapter.resolveModel('peer-link', 'auto')).context.contextWindow > 0, true);
+
+// First turn: the task (minus the return guidance) opens a remote Session.
+const history = [
+  { id: 'rc', role: 'user', content: [{ type: 'text', text: 'runtime context' }], source: { kind: 'runtime-context' } },
+  { ...userMsg('task one'), content: [{ type: 'text', text: 'task one' }, { type: 'text', text: 'Your parent agent id is "p". Before you finish, send...' }] },
+];
+let turn = await collect(history);
+assert.equal(remote.prompts.length, 1);
+assert.equal(remote.prompts[0].text, 'task one', 'only the task is forwarded');
+assert.equal(turn.text.split('\n\n')[0], 'reply:task one');
+assert.match(turn.text, /remote session s1 on loop/);
+assert.equal(turn.finish.reason.kind, 'stop');
+assert.equal(links.get(child.id).remote, 's1');
+history.push(assistantMsg(turn.text));
+
+// A later send_message continues the same remote Session.
+history.push({ ...userMsg('', 'agent-message'), content: [{ type: 'text', text: 'Agent p sent a message: ' }, { type: 'text', text: 'follow up' }] });
+turn = await collect(history);
+assert.equal(remote.prompts.at(-1).text, 'follow up', 'the relay prefix is stripped');
+assert.equal(remote.prompts.at(-1).mode, 'queue');
+assert.equal(turn.text.split('\n\n')[0], 'reply:follow up');
+history.push(assistantMsg(turn.text));
+
+// Nothing new to send: the route answers without contacting the peer.
+const before = remote.prompts.length;
+turn = await collect(history.concat([{ id: 'rc2', role: 'user', content: [{ type: 'text', text: 'ctx' }], source: { kind: 'runtime-context' } }]));
+assert.equal(remote.prompts.length, before);
+
+// A message steered in mid-turn is relayed into the running remote turn at once,
+// and its reply is held for the step that admits that message.
+remote.hold = true;
+history.push(userMsg('long task'));
+const pendingTurn = collect(history);
+await new Promise((resolve) => setTimeout(resolve, 400));
+const steer = userMsg('', 'agent-message');
+steer.content = [{ type: 'text', text: 'Agent p sent a message: ' }, { type: 'text', text: 'also this' }];
+child.inbox.nextStep = [steer];
+adapter.onInboxInserted(child, steer);
+await new Promise((resolve) => setTimeout(resolve, 400));
+assert.equal(remote.prompts.at(-1).text, 'also this');
+assert.equal(remote.prompts.at(-1).mode, 'steer');
+finishTurn();
+turn = await pendingTurn;
+assert.equal(turn.text, '', 'the reply waits for the relayed message');
+assert.match(turn.reasoning, /steered the running turn/);
+history.push(assistantMsg(''));
+history.push(steer);
+child.inbox.nextStep = [];
+const promptsBefore = remote.prompts.length;
+turn = await collect(history);
+assert.equal(remote.prompts.length, promptsBefore, 'a relayed message is not sent twice');
+assert.equal(turn.text.split('\n\n')[0], 'reply:long task+also this');
+history.push(assistantMsg(turn.text));
+remote.hold = false;
+
+// Stopping the child cancels the remote turn; a disposed child leaves it running.
+remote.hold = true;
+history.push(userMsg('stop me'));
+const stopper = new AbortController();
+const stopped = collect(history, stopper.signal);
+await new Promise((resolve) => setTimeout(resolve, 300));
+stopper.abort({ kind: 'user' });
+await assert.rejects(stopped);
 await new Promise((resolve) => setTimeout(resolve, 200));
-assert.equal(aborted.stopReason, 'aborted');
-assert.equal(cancelled, 1, 'remote cancel is sent exactly once');
+assert.equal(remote.cancels, 1, 'remote cancel is sent exactly once');
+assert.equal(links.get(child.id).pending, null);
+history.pop();
+remote.hold = false;
+
+// Pending remote questions are answered by the next forwarded message.
+const answered = [];
+services.userQuestions = { answer: (_agent, callId, answer) => (answered.push({ callId, answer }), true) };
+services.sessionProjections = { stateOf: () => ({ questions: { active: [{ callId: 'q1', state: 'continued', questions: [{ id: 'a', question: 'Which?' }] }] } }) };
+const answerRun = await ops.run({ prompt: 'option B', sessionId: 's1', from: 'client', answerQuestions: true });
+assert.equal(answerRun.answered, 1);
+assert.deepEqual(answered[0], { callId: 'q1', answer: { answers: [{ id: 'a', selected: [], custom: 'option B' }] } });
+delete services.userQuestions;
+delete services.sessionProjections;
+
+// The mapping survives a restart.
+assert.equal(new LinkStore(join(process.env.HOME, 'links.json')).get(child.id).remote, 's1');
 
 discovery.close();
 await listener.close();

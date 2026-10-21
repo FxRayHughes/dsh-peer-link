@@ -2,12 +2,16 @@
 #
 # `peer-link` listens on a random free LAN port that peers find through signed
 # UDP discovery (udp/47788, shared bind), registers the `peer` subagent
-# provider, and adds the `peer_dsh` tool. Pairing secrets live in
-# ~/.dsh/peer-link/state.json, never in this file or the profile patch.
+# provider and the `peer-link` model route, and adds the `peer_dsh` tool.
+# Pairing secrets live in ~/.dsh/peer-link/state.json, never in this file or
+# the profile patch.
 #
 # `tool-subagent-peer` mounts the stock delegation tool over that provider as
-# `subagent_peer`: the remote DSH runs a complete agent and its final answer
-# arrives as the usual completion notice. Recursion is left to the remote side.
+# `subagent_peer`. Each child is a continuable local Agent on the `peer-link`
+# route: its turns run as one remote Session in the peer's DSH, its final
+# answer arrives as the usual completion notice, and `send_message` steers it
+# or continues it later. `model: auto` uses the configured default peer (or
+# the only one); a peer name pins one. Recursion is left to the remote side.
 - insert:
     - id: peer-link
       name: '@local/dsh-peer-link'
@@ -19,3 +23,6 @@
         provider: peer
         toolName: subagent_peer
         maxDepth: provider-managed
+        agentOptions:
+          provider: peer-link
+          model: auto

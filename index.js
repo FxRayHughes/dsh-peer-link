@@ -4,6 +4,8 @@ import z from '@deepseek-ai/schemastery';
 import { Discovery, DISCOVERY_PORT } from './discovery.js';
 import { PeerClient } from './peer-client.js';
 import { PeerError } from './protocol.js';
+import { LinkStore } from './links.js';
+import { PeerModelAdapter, PROVIDER } from './peer-model.js';
 import { followRun, PeerSubagentProvider } from './provider.js';
 import { SessionOps, startServer } from './server.js';
 import { decodeCode, defaultDisplayName, PAIRING_FILE, PeerState, publicPeer } from './state.js';
@@ -16,13 +18,15 @@ import { RPC_PATH, webRoute } from './web.js';
  *    follow Sessions here; signed UDP discovery tells them where it is.
  *  - A `peer` subagent provider makes a remote DSH a delegation backend; the
  *    patch mounts `dsh-tool-subagent` over it as the `subagent_peer` tool.
+ *    Its children are continuable local Agents on the `peer-link` model
+ *    route, which runs each of their turns in one remote Session.
  *  - The `peer_dsh` tool pairs peers and continues, reads, or cancels remote Sessions.
  *
  * Secrets live in ~/.dsh/peer-link/state.json (mode 0600), never in the profile.
  */
 
 export const name = 'peer-link';
-export const inject = ['subagents'];
+export const inject = ['subagents', 'llm'];
 
 export const Config = z.object({
   displayName: z.string().default('').description('本机在对端显示的名称；留空用主机名').volatile(),
@@ -134,11 +138,18 @@ export function apply(ctx, config) {
   // ---- Peer clients ---------------------------------------------------------
   const clientFor = (peerName) => new PeerClient(state, state.peer(peerName), ctx.logger, discovery);
 
-  // ---- Subagent provider --------------------------------------------------
-  ctx.effect(
-    () => ctx.subagents.registerProvider(new PeerSubagentProvider({ name: 'peer', getConfig, clientFor, logger: ctx.logger })),
-    'peer-link: subagent provider',
-  );
+  // ---- Subagent provider and its model route ------------------------------
+  const adapter = new PeerModelAdapter({
+    getConfig,
+    clientFor,
+    listPeerNames: () => state.peers().map((peer) => peer.name),
+    links: new LinkStore(),
+    ctx,
+  });
+  ctx.effect(() => ctx.llm.registerAdapter([PROVIDER], adapter), 'peer-link: model route');
+  // Steering that reaches a child mid-turn is relayed to its running remote turn at once.
+  ctx.on('agent/inbox/inserted', ({ agent, message }) => adapter.onInboxInserted(agent, message), { global: true });
+  ctx.effect(() => ctx.subagents.registerProvider(new PeerSubagentProvider({ name: 'peer' })), 'peer-link: subagent provider');
 
   // ---- Operations shared by the tool and the settings page -----------------
   const selfInfo = () => ({
@@ -236,11 +247,12 @@ export function apply(ctx, config) {
           cwdCandidates: [exec.agent?.session?.header?.cwd],
           from: cfg.displayName,
           preface: !args.session_id,
+          answerQuestions: Boolean(args.session_id),
         },
         { signal: exec.signal, timeoutMs: 60_000 },
       );
       const waitSeconds = Math.min(Math.max(Number(args.wait_seconds ?? RUN_WAIT_DEFAULT_S), 0), 3600);
-      if (waitSeconds === 0) return { peer: client.peer.name, session_id: started.sessionId, status: 'started' };
+      if (waitSeconds === 0) return { peer: client.peer.name, session_id: started.sessionId, status: started.answered ? 'answered' : 'started' };
       const window = new AbortController();
       const timer = setTimeout(() => window.abort(), waitSeconds * 1000);
       const onAbort = () => window.abort();
@@ -285,7 +297,8 @@ export function apply(ctx, config) {
         'action=peers lists paired peers with online status; pair adds a peer from its pairing code; unpair removes one; ' +
         'run sends a prompt to a new remote Session (or continues session_id) and waits for the reply; ' +
         'sessions lists recent remote Sessions; read returns a Session\'s latest messages; cancel stops its running turn. ' +
-        'For one-off background delegation prefer the subagent_peer tool; use run to continue a remote Session or answer its questions.',
+        'For delegation prefer the subagent_peer tool, whose children you continue with send_message; use run for remote Sessions started elsewhere. ' +
+        'When a remote Session waits on a question, run on its session_id passes the prompt on as the answer.',
       parameters: {
         type: 'object',
         properties: {

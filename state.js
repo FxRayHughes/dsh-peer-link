@@ -25,7 +25,7 @@ export const PAIRING_FILE = join(STATE_DIR, 'pairing-code.txt');
 const CODE_PREFIX = 'dshpeer1.';
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 
-function writePrivate(path, text) {
+export function writePrivate(path, text) {
   mkdirSync(STATE_DIR, { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, text, { mode: 0o600 });
