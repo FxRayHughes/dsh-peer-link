@@ -80,6 +80,17 @@ window.__ModuleLoader__.load({
       invalidPort: '须为 0–65535 的整数',
       invalidDiscoveryPort: '须为 1–65535 的整数',
       error: '出错：{message}',
+      shareWeb: '共享网页界面',
+      shareWebHint: '已配对的设备可以在局域网内一键打开本机的 DSH 页面，查看和操作这里的会话。',
+      devices: '对端设备',
+      openWeb: '打开网页',
+      openingWeb: '正在打开…',
+      openWebHint: '在浏览器中打开 {peer} 的 DSH 页面',
+      openRemote: '在 {peer} 上查看',
+      openRemoteHint: '在浏览器中打开 {peer} 上对应的会话',
+      offline: '离线',
+      webOff: '对方没有开启「共享网页界面」',
+      webOld: '对方的 DSH 互联版本过旧，升级到 0.4.0 或更高后才能打开网页',
     };
     const en = {
       summary: 'Link DSH instances on the LAN: delegate subagents and continue remote sessions',
@@ -155,6 +166,17 @@ window.__ModuleLoader__.load({
       invalidPort: 'Must be a whole number from 0 to 65535',
       invalidDiscoveryPort: 'Must be a whole number from 1 to 65535',
       error: 'Error: {message}',
+      shareWeb: 'Share web page',
+      shareWebHint: 'Paired devices on the LAN can open this machine\'s DSH page with one click to see and work in its sessions.',
+      devices: 'Peer devices',
+      openWeb: 'Open page',
+      openingWeb: 'Opening…',
+      openWebHint: 'Open {peer}\'s DSH page in the browser',
+      openRemote: 'View on {peer}',
+      openRemoteHint: 'Open this session on {peer} in the browser',
+      offline: 'Offline',
+      webOff: 'The other machine does not share its web page',
+      webOld: 'The other machine runs an older peer link; it needs 0.4.0 or later to open its page',
     };
 
     const NS = 'peer-link';
@@ -186,6 +208,7 @@ window.__ModuleLoader__.load({
         fields: [
           { key: 'permissionPreset', kind: 'preset' },
           { key: 'allowedRoots', kind: 'roots', rows: 3, placeholder: '/Users/me/projects' },
+          { key: 'shareWeb', kind: 'switch' },
         ],
       },
     ];
@@ -242,6 +265,34 @@ window.__ModuleLoader__.load({
 @media (max-width:640px){.pl-row{flex-direction:column;align-items:stretch;gap:8px}.pl-control{flex-basis:auto}.pl-value{text-align:left}}
 `;
 
+    /** Sidebar and session-header controls that open a peer's page. */
+    const NAV_CSS = `
+.pl-dev{position:relative;display:flex;flex:1;min-width:0}
+.pl-dev-btn{box-sizing:border-box;flex:1;min-width:0;display:flex;align-items:center;gap:8px;min-height:36px;margin:0 2px;padding:7px 8px;border:none;border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;text-align:left;cursor:pointer}
+.pl-dev-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pl-dev-btn:focus-visible,.pl-pop-row:focus-visible,.pl-act:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}
+.pl-dev-btn.rail{flex:0 0 auto;width:36px;height:36px;margin:0;padding:0;justify-content:center}
+.pl-dev-btn svg,.pl-act svg{flex:none}
+.pl-dev-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-pop{position:fixed;z-index:1000;box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:2px;padding:6px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 8px 28px rgba(0,0,0,.18)}
+.pl-pop-row{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:8px 10px;border:none;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:18px;text-align:left;cursor:pointer}
+.pl-pop-row:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.pl-pop-row:disabled{cursor:default}
+.pl-pop-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.pl-pop-name{font-size:14px;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-pop-sub{font:12px/16px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.pl-pop-sub.why{font-family:inherit}
+.pl-pop-go{flex:none;font-size:12px;color:var(--dsw-alias-state-business-primary,var(--dsw-alias-label-secondary))}
+.pl-pop-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-idle-primary,var(--dsw-alias-label-tertiary))}
+.pl-pop-dot.on{background:var(--dsw-alias-state-success-primary)}
+.pl-pop-dot.off{background:var(--dsw-alias-state-error-primary)}
+.pl-pop-err{padding:4px 10px;font-size:12px;line-height:16px;color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
+.pl-act{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}
+.pl-act:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pl-act:disabled{opacity:.6;cursor:default}
+.pl-act-err{font-size:12px;color:var(--dsw-alias-state-error-primary);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+`;
+
     /** The plugin's Host route, relative to the page so a base path is kept. */
     function rpc(method, args) {
       return fetch('peer-link/rpc', {
@@ -259,6 +310,59 @@ window.__ModuleLoader__.load({
         if (envelope && envelope.ok === true) return envelope.value;
         throw new Error(envelope?.error?.message ?? `HTTP ${response.status}`);
       });
+    }
+
+    /** Whether a probed peer can serve its page right now, else the locale key saying why not. */
+    function webBlocker(peer) {
+      if (!peer.online) return 'offline';
+      if (peer.remote?.web === true) return undefined;
+      return peer.remote?.web === false ? 'webOff' : 'webOld';
+    }
+
+    /** Server messages the user can act on, in the user's words. */
+    function webError(t, error) {
+      const message = error?.message ?? String(error);
+      if (/unknown op webTicket/.test(message)) return t('webOld');
+      if (/does not share its web page/.test(message)) return t('webOff');
+      return message;
+    }
+
+    /**
+     * Open a peer's page through a one-time link. In a browser, a tab opened
+     * inside the click keeps popup blockers quiet; the desktop app hands every
+     * http link to the system browser and refuses blank windows, so there the
+     * final link is opened directly.
+     */
+    function openPeerWeb(peer, session) {
+      const pending = window.dshDesktop === undefined ? window.open('', '_blank') : null;
+      if (pending) {
+        try {
+          pending.opener = null;
+          pending.document.title = '…';
+        } catch {
+          // Cross-origin or already navigating; nothing to prepare.
+        }
+      }
+      return rpc('openWeb', session ? { peer, session } : { peer }).then(
+        (value) => {
+          if (pending && !pending.closed) pending.location.href = value.url;
+          else window.open(value.url, '_blank', 'noopener');
+          return value;
+        },
+        (error) => {
+          pending?.close();
+          throw error;
+        },
+      );
+    }
+
+    function DeviceIcon() {
+      return h(
+        'svg',
+        { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
+        h('rect', { x: 1.75, y: 2.25, width: 12.5, height: 8.5, rx: 1.5 }),
+        h('path', { d: 'M5.5 13.75h5M8 10.75v3' }),
+      );
     }
 
     function fill(text, vars) {
@@ -429,6 +533,7 @@ window.__ModuleLoader__.load({
     function PeerRow({ t, peer, onUnpaired }) {
       const [armed, setArmed] = useState(false);
       const [busy, setBusy] = useState(false);
+      const [opening, setOpening] = useState(false);
       const [error, setError] = useState(null);
       useEffect(() => {
         if (!armed) return undefined;
@@ -462,6 +567,25 @@ window.__ModuleLoader__.load({
           !peer.online && peer.error ? h('div', { className: 'pl-note err' }, peer.error) : null,
           error ? h('div', { className: 'pl-note err' }, fill(t('error'), { message: error })) : null,
         ),
+        peer.online && peer.remote?.web === true
+          ? h(
+              'button',
+              {
+                type: 'button',
+                className: 'pl-btn',
+                disabled: opening,
+                title: fill(t('openWebHint'), { peer: peer.name }),
+                onClick: () => {
+                  setOpening(true);
+                  setError(null);
+                  openPeerWeb(peer.name)
+                    .catch((cause) => setError(webError(t, cause)))
+                    .finally(() => setOpening(false));
+                },
+              },
+              opening ? t('openingWeb') : t('openWeb'),
+            )
+          : null,
         h('button', { type: 'button', className: 'pl-btn danger', disabled: busy, onClick: unpair }, armed ? t('unpairConfirm') : t('unpair')),
       );
     }
@@ -740,6 +864,225 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Sidebar-foot entry to paired devices' pages. With one peer it opens that
+     * peer at once; with several it lists them. Hidden until something is paired.
+     */
+    function DevicesButton({ t, wide }) {
+      const [paired, setPaired] = useState([]);
+      const [open, setOpen] = useState(false);
+      const [probes, setProbes] = useState({});
+      const [busy, setBusy] = useState(null);
+      const [error, setError] = useState(null);
+      const root = useRef(null);
+
+      useEffect(() => {
+        let live = true;
+        rpc('paired')
+          .then((value) => live && setPaired(value.peers ?? []))
+          .catch(() => undefined);
+        return () => {
+          live = false;
+        };
+      }, []);
+
+      // Each row settles on its own, so one unreachable peer does not hold up the rest.
+      useEffect(() => {
+        if (!open) return undefined;
+        let live = true;
+        setProbes({});
+        rpc('paired')
+          .then((value) => {
+            if (!live) return;
+            setPaired(value.peers ?? []);
+            for (const peer of value.peers ?? []) {
+              rpc('probe', { peer: peer.name })
+                .then((probe) => live && setProbes((current) => ({ ...current, [peer.name]: probe })))
+                .catch((cause) => live && setProbes((current) => ({ ...current, [peer.name]: { ...peer, online: false, error: cause.message } })));
+            }
+          })
+          .catch((cause) => live && setError(cause.message));
+        const away = (event) => {
+          if (!root.current?.contains(event.target)) setOpen(false);
+        };
+        const escape = (event) => event.key === 'Escape' && setOpen(false);
+        document.addEventListener('pointerdown', away, true);
+        document.addEventListener('keydown', escape);
+        return () => {
+          live = false;
+          document.removeEventListener('pointerdown', away, true);
+          document.removeEventListener('keydown', escape);
+        };
+      }, [open]);
+
+      if (paired.length === 0) return null;
+      const single = paired.length === 1 ? paired[0].name : undefined;
+
+      const go = (name) => {
+        setBusy(name);
+        setError(null);
+        openPeerWeb(name)
+          .then(() => {
+            setBusy(null);
+            setOpen(false);
+          })
+          .catch((cause) => {
+            setBusy(null);
+            setError(webError(t, cause));
+            setOpen(true);
+          });
+      };
+
+      // Fixed to the button so the sidebar's overflow does not clip it.
+      const place = () => {
+        const rect = root.current?.getBoundingClientRect();
+        if (!rect) return undefined;
+        return wide
+          ? { left: rect.left, bottom: window.innerHeight - rect.top + 6, width: Math.max(rect.width, 260) }
+          : { left: rect.right + 8, bottom: window.innerHeight - rect.bottom };
+      };
+
+      const label = single ?? t('devices');
+      const title = single ? fill(t('openWebHint'), { peer: single }) : t('devices');
+      return h(
+        'div',
+        { className: 'pl-dev', ref: root },
+        h('style', null, NAV_CSS),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: wide ? 'pl-dev-btn' : 'pl-dev-btn rail',
+            title,
+            'aria-label': title,
+            'aria-haspopup': single ? undefined : 'menu',
+            'aria-expanded': single ? undefined : open,
+            disabled: busy !== null,
+            onClick: () => (single ? go(single) : setOpen((value) => !value)),
+          },
+          h(DeviceIcon),
+          wide ? h('span', { className: 'pl-dev-name' }, busy ? t('openingWeb') : label) : null,
+        ),
+        open
+          ? h(
+              'div',
+              { className: 'pl-pop', role: 'menu', style: place() },
+              paired.map((listed) => {
+                const probed = probes[listed.name];
+                const peer = probed ?? listed;
+                const blocker = probed === undefined ? undefined : webBlocker(peer);
+                const detail = peer.remote ? `${peer.remote.platform} · ${peer.addr ?? ''}` : peer.addr ?? '';
+                return h(
+                  'button',
+                  {
+                    key: peer.name,
+                    type: 'button',
+                    role: 'menuitem',
+                    className: 'pl-pop-row',
+                    disabled: probed === undefined || blocker !== undefined || busy !== null,
+                    title: blocker ? t(blocker) : fill(t('openWebHint'), { peer: peer.name }),
+                    onClick: () => go(peer.name),
+                  },
+                  h('span', { className: probed === undefined ? 'pl-pop-dot' : peer.online ? 'pl-pop-dot on' : 'pl-pop-dot off' }),
+                  h(
+                    'span',
+                    { className: 'pl-pop-main' },
+                    h('span', { className: 'pl-pop-name' }, peer.name),
+                    probed !== undefined && blocker === undefined
+                      ? h('span', { className: 'pl-pop-sub' }, detail)
+                      : h('span', { className: 'pl-pop-sub why' }, probed === undefined ? t('checking') : t(blocker)),
+                  ),
+                  probed !== undefined && blocker === undefined ? h('span', { className: 'pl-pop-go' }, busy === peer.name ? t('openingWeb') : t('openWeb')) : null,
+                );
+              }),
+              error ? h('div', { className: 'pl-pop-err', role: 'status' }, error) : null,
+            )
+          : null,
+      );
+    }
+
+    /**
+     * On a `subagent_peer` child, opens the remote Session it is relayed to.
+     * The link appears with the child's first turn, so a fresh child is checked
+     * again for a short while.
+     */
+    function RemoteSessionAction({ t, sessionId }) {
+      const [remote, setRemote] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+      useEffect(() => {
+        if (typeof sessionId !== 'string') return undefined;
+        let live = true;
+        let timer;
+        let tries = 0;
+        const check = () =>
+          rpc('remoteOf', { session: sessionId })
+            .then((value) => {
+              if (!live) return;
+              if (value) setRemote(value);
+              else if (++tries < 15) timer = setTimeout(check, 4000);
+            })
+            .catch(() => undefined);
+        setRemote(null);
+        check();
+        return () => {
+          live = false;
+          clearTimeout(timer);
+        };
+      }, [sessionId]);
+      if (remote === null) return null;
+      const title = fill(t('openRemoteHint'), { peer: remote.peer });
+      return h(
+        React.Fragment,
+        null,
+        h('style', null, NAV_CSS),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'pl-act',
+            title,
+            'aria-label': title,
+            disabled: busy,
+            onClick: () => {
+              setBusy(true);
+              setError(null);
+              openPeerWeb(remote.peer, remote.session)
+                .catch((cause) => setError(webError(t, cause)))
+                .finally(() => setBusy(false));
+            },
+          },
+          h(DeviceIcon),
+          busy ? t('openingWeb') : fill(t('openRemote'), { peer: remote.peer }),
+        ),
+        error ? h('span', { className: 'pl-act-err', role: 'status', title: error }, error) : null,
+      );
+    }
+
+    /**
+     * A peer opened this page for one Session (`#peer-link-session=<id>`):
+     * show it once the Session list knows it, then drop the fragment.
+     */
+    function openSharedSession(ctx) {
+      const match = /^#peer-link-session=([^&]+)$/.exec(window.location.hash);
+      if (!match) return () => {};
+      const id = decodeURIComponent(match[1]);
+      window.history.replaceState(window.history.state, '', window.location.pathname + window.location.search);
+      let timer;
+      let tries = 0;
+      const attempt = () => {
+        try {
+          const workspace = ctx.get('uiWorkspace');
+          if (workspace === undefined) throw new Error('workspace UI not ready');
+          workspace.openSession(id);
+        } catch {
+          if (++tries < 60) timer = setTimeout(attempt, 250);
+        }
+      };
+      timer = setTimeout(attempt, 0);
+      return () => clearTimeout(timer);
+    }
+
     function PeerLinkPage({ t, form }) {
       const [data, reload] = usePeers();
       const [presets, setPresets] = useState([]);
@@ -768,6 +1111,13 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'peer-link: locale');
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'peer-link.access', locale: NS }, AccessPrompt));
+        ctx.slots.inject('sidebar.footer.action', () =>
+          ctx.slots.register({ name: 'sidebar.footer.action', id: 'peer-link.devices', order: 10, locale: NS }, DevicesButton),
+        );
+        ctx.slots.inject('conversation.session.header.actions', () =>
+          ctx.slots.register({ name: 'conversation.session.header.actions', id: 'peer-link.remote', order: 50, locale: NS }, RemoteSessionAction),
+        );
+        ctx.effect(() => openSharedSession(ctx), 'peer-link: open shared session');
         ctx.slots.inject('plugins.row.config', () =>
           ctx.slots.register({ name: 'plugins.row.config', key: ROW_KEY, locale: NS }, (props) =>
             props.view === 'summary' ? props.t('summary') : h(PeerLinkPage, props),

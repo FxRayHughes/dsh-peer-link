@@ -10,6 +10,7 @@ import { followRun, PeerSubagentProvider } from './provider.js';
 import { SessionOps, startServer } from './server.js';
 import { decodeCode, defaultDisplayName, PAIRING_FILE, PeerState, publicPeer } from './state.js';
 import { RPC_PATH, webRoute } from './web.js';
+import { WebShare } from './web-share.js';
 
 /**
  * Peer-link Host plugin: connects this DSH with other DSH instances on the LAN.
@@ -21,6 +22,9 @@ import { RPC_PATH, webRoute } from './web.js';
  *    Its children are continuable local Agents on the `peer-link` model
  *    route, which runs each of their turns in one remote Session.
  *  - The `peer_dsh` tool pairs peers and continues, reads, or cancels remote Sessions.
+ *  - With `shareWeb`, the same listener also serves this DSH's Web page to
+ *    paired peers' users through one-time links (see web-share.js), so the
+ *    other machine's page and conversations open with one click.
  *
  * Secrets live in ~/.dsh/peer-link/state.json (mode 0600), never in the profile.
  */
@@ -59,6 +63,11 @@ export const Config = z.object({
     .description('对端发来的新会话使用的权限预设（如 danger-full-access）；留空沿用本机默认。无人值守时审批会卡住任务')
     .volatile(),
   delegationNote: z.boolean().default(true).description('在委派任务前附加"无人值守、请自行决策并汇报"的说明').volatile(),
+  shareWeb: z
+    .boolean()
+    .default(true)
+    .description('允许已配对的设备在局域网内打开本机的 DSH 网页界面（一次性链接进入，查看和操作本机的会话）')
+    .volatile(),
 });
 
 const KEYS = Object.keys(Config.dict);
@@ -80,6 +89,28 @@ export function apply(ctx, config) {
   state.load();
   const getConfig = () => snapshot(config);
   const ops = new SessionOps(ctx, getConfig, state);
+
+  // ---- Web page sharing -----------------------------------------------------
+  // The local DSH Web listener and its launch token, read on use: the
+  // listener may come up after this plugin, and the token changes per launch.
+  const webUpstream = () => {
+    const webServer = ctx.get('webServer');
+    const connection = ctx.get('connection');
+    if (webServer === undefined || connection?.authenticatedUrl === undefined) return undefined;
+    try {
+      const origin = new URL(webServer.getOrigin()).origin;
+      const authed = new URL(connection.authenticatedUrl(`${origin}/`));
+      return { origin, tokenPath: authed.pathname + authed.search };
+    } catch {
+      return undefined;
+    }
+  };
+  ops.web = new WebShare({
+    enabled: () => getConfig().shareWeb !== false,
+    upstream: webUpstream,
+    secret: () => state.secret,
+    logger: ctx.logger,
+  });
 
   // ---- LAN listener and discovery ------------------------------------------
   let listener;
@@ -108,7 +139,7 @@ export function apply(ctx, config) {
         await discovery.start();
         if (!cfg.listen) return;
         try {
-          listener = await startServer({ ctx, ops, state, host: cfg.host, port: cfg.port || state.lastPort, allowCidrs: cfg.allowCidrs });
+          listener = await startServer({ ctx, ops, state, host: cfg.host, port: cfg.port || state.lastPort, allowCidrs: cfg.allowCidrs, web: ops.web });
         } catch (error) {
           appliedKey = '';
           ctx.logger.warn(`peer-link: cannot listen on ${cfg.host}:${cfg.port}: ${error.message}`);
@@ -160,14 +191,14 @@ export function apply(ctx, config) {
     pairingCodeFile: PAIRING_FILE,
   });
 
+  async function probePeer(peer, signal) {
+    const probe = await new PeerClient(state, peer, ctx.logger, discovery).probe();
+    if (signal?.aborted) throw signal.reason;
+    return { ...publicPeer(peer), online: probe.online, ...(probe.online ? { remote: probe.info } : { error: probe.error }) };
+  }
+
   async function listPeers(signal) {
-    const peers = await Promise.all(
-      state.peers().map(async (peer) => {
-        const probe = await new PeerClient(state, peer, ctx.logger, discovery).probe();
-        if (signal?.aborted) throw signal.reason;
-        return { ...publicPeer(peer), online: probe.online, ...(probe.online ? { remote: probe.info } : { error: probe.error }) };
-      }),
-    );
+    const peers = await Promise.all(state.peers().map((peer) => probePeer(peer, signal)));
     return { self: selfInfo(), peers };
   }
 
@@ -190,6 +221,23 @@ export function apply(ctx, config) {
     const reply = await client.call('hello', { code: own.code }, { signal, timeoutMs: 8_000 });
     const probe = await client.probe();
     return { paired: saved.name, addr: client.peer.addr, reciprocal: reply.paired === true, remote: probe.info ?? probe.error };
+  }
+
+  /**
+   * A one-time link to a peer's Web page. The browser connects to the
+   * address this machine just reached the peer on, which is on the same LAN.
+   * @param sessionId - the peer Session to open, when known.
+   */
+  async function openWeb(peerName, sessionId, signal) {
+    const client = clientFor(peerName);
+    const value = await client.call('webTicket', sessionId ? { sessionId } : {}, { signal, timeoutMs: 8_000 });
+    return { peer: client.peer.name, url: `http://${client.peer.addr}${value.path}`, expiresIn: value.expiresIn };
+  }
+
+  /** The peer and remote Session behind a `subagent_peer` child, if it is one. */
+  function remoteOf(childId) {
+    const link = adapter.links.get(String(childId ?? ''));
+    return link?.peer && link?.remote ? { peer: link.peer, session: link.remote } : null;
   }
 
   function unpair(name) {
@@ -242,6 +290,10 @@ export function apply(ctx, config) {
     },
     access: () => accessState(),
     decideAccess: (args) => decideAccess(args.grant === true),
+    paired: () => ({ peers: state.peers().map(publicPeer) }),
+    probe: (args, signal) => probePeer(clientFor(args.peer).peer, signal),
+    openWeb: (args, signal) => openWeb(args.peer, typeof args.session === 'string' ? args.session : undefined, signal),
+    remoteOf: (args) => remoteOf(args.session),
   };
   ctx.inject(['webServer', 'connection'], (web) => {
     web.effect(() => web.webServer.register(webRoute(web.connection, pageApi)), `peer-link: POST ${RPC_PATH}`);

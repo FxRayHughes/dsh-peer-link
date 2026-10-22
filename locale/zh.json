@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "DSH 互联",
-    "description": "把局域网里另一台电脑上的 DSH 当作子代理：subagent_peer 委派任务给对端完整 agent，peer_dsh 配对、续聊、查看和取消对端会话。配对码在 ~/.dsh/peer-link/pairing-code.txt。"
+    "description": "把局域网里另一台电脑上的 DSH 当作子代理：subagent_peer 委派任务给对端完整 agent，peer_dsh 配对、续聊、查看和取消对端会话，侧边栏「对端设备」一键打开对端的 DSH 网页。配对码在 ~/.dsh/peer-link/pairing-code.txt。"
   }
 }

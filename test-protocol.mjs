@@ -1,6 +1,6 @@
-// Offline checks: signing, replay rejection, pairing codes, discovery, and
-// the peer-link model route against a fake sessionController over real
-// loopback sockets.
+// Offline checks: signing, replay rejection, pairing codes, discovery, the
+// peer-link model route against a fake sessionController, and the shared Web
+// page against a fake DSH listener, over real loopback sockets.
 // Run with: node test-protocol.mjs   (uses a temporary HOME)
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
@@ -16,9 +16,11 @@ const { SessionOps, startServer } = await import('./server.js');
 const { followRun } = await import('./provider.js');
 const { PeerModelAdapter } = await import('./peer-model.js');
 const { LinkStore } = await import('./links.js');
+const { WebShare, ENTER_PATH } = await import('./web-share.js');
 const { PeerClient } = await import('./peer-client.js');
 const { Discovery, keyIdOf } = await import('./discovery.js');
 const http = await import('node:http');
+const net = await import('node:net');
 
 // --- signing --------------------------------------------------------------
 const secret = newSecret();
@@ -287,4 +289,155 @@ assert.equal(new LinkStore(join(process.env.HOME, 'links.json')).get(child.id).r
 
 discovery.close();
 await listener.close();
+
+// ---- Shared Web page ----------------------------------------------------
+{
+// A fake DSH listener: the launch token mints a Host-bound cookie, and the
+// Host/Origin fence refuses anything but its own loopback authority.
+const TOKEN = 'launch-token-xyz';
+let upstreamPort;
+const seen = [];
+const dsh = http.createServer((req, res) => {
+  seen.push({ url: req.url, host: req.headers.host, origin: req.headers.origin, cookie: req.headers.cookie });
+  const host = req.headers.host;
+  if (host !== `127.0.0.1:${upstreamPort}`) { res.writeHead(403); return res.end('fence'); }
+  if (req.headers.origin && req.headers.origin !== `http://${host}`) { res.writeHead(403); return res.end('origin'); }
+  const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/' && url.searchParams.get('token') === TOKEN) {
+    res.writeHead(303, { location: './', 'set-cookie': [`dsh-auth-abc=ok-${host}; Path=/; HttpOnly; SameSite=Strict`] });
+    return res.end();
+  }
+  const authed = String(req.headers.cookie ?? '').includes(`dsh-auth-abc=ok-${host}`);
+  if (!authed) { res.writeHead(401); return res.end('unauth'); }
+  if (req.headers['peer_link_gate'] || String(req.headers.cookie).includes('peer_link_gate')) { res.writeHead(500); return res.end('gate leaked'); }
+  if (url.pathname === '/api/echo') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ ok: true })); }
+  res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>DSH APP</html>');
+});
+dsh.on('upgrade', (req, socket) => {
+  const authed = String(req.headers.cookie ?? '').includes('dsh-auth-abc=ok-');
+  if (!authed || req.headers.host !== `127.0.0.1:${upstreamPort}`) return socket.end('HTTP/1.1 401 x\r\n\r\n');
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+  socket.on('data', (d) => socket.write(d)); // echo
+});
+await new Promise((r) => dsh.listen(0, '127.0.0.1', r));
+upstreamPort = dsh.address().port;
+
+let enabled = true;
+const logger = { info() {}, warn() {} };
+const secret = 'S'.repeat(43);
+const state = { secret };
+const web = new WebShare({
+  enabled: () => enabled,
+  upstream: () => ({ origin: `http://127.0.0.1:${upstreamPort}`, tokenPath: `/?token=${TOKEN}` }),
+  secret: () => secret,
+  logger,
+});
+const ops = new SessionOps({ logger, get: () => undefined }, () => ({ displayName: 'B' }), state);
+ops.web = web;
+const server = await startServer({ ctx: { logger }, ops, state, host: '127.0.0.1', port: 0, allowCidrs: '127.0.0.0/8', web });
+const base = `http://127.0.0.1:${server.port}`;
+
+const peer = { name: 'B', secret, addr: `127.0.0.1:${server.port}`, hints: [] };
+const client = new PeerClient({ rememberAddr() {} }, peer, logger, undefined);
+const info = await client.call('info');
+assert.equal(info.web, true, 'info advertises web');
+
+const get = (path, headers = {}) => fetch(base + path, { headers, redirect: 'manual' });
+const cookiesOf = (res) => res.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+
+// 1. no gate → refused, upstream untouched
+let before = seen.length;
+let r = await get('/', { accept: 'text/html' });
+assert.equal(r.status, 401); assert.equal(seen.length, before, 'ungated request never reaches DSH');
+r = await get('/api/echo');
+assert.equal(r.status, 401);
+
+// 2. ticket via signed protocol, then enter
+const t1 = await client.call('webTicket', { sessionId: 'sess-123' });
+assert.ok(t1.path.startsWith(ENTER_PATH));
+r = await get(t1.path, { accept: 'text/html' });
+assert.equal(r.status, 200);
+const html = await r.text();
+assert.match(html, /location\.replace\("\/#peer-link-session=sess-123"\)/);
+assert.doesNotMatch(html, new RegExp(TOKEN), 'launch token never reaches the browser');
+const jar = cookiesOf(r);
+assert.match(jar, /peer_link_gate=/); assert.match(jar, /dsh-auth-abc=/);
+
+// 3. ticket is single-use
+r = await get(t1.path, { accept: 'text/html' });
+assert.equal(r.status, 403);
+
+// 4. gated + DSH cookie → page and API through relay with rewritten Host
+r = await get('/', { accept: 'text/html', cookie: jar });
+assert.equal(r.status, 200); assert.equal(await r.text(), '<html>DSH APP</html>');
+r = await fetch(base + '/api/echo', { method: 'POST', headers: { cookie: jar, origin: base, 'content-type': 'application/json' }, body: '{}' });
+assert.equal(r.status, 200, 'same-origin API call passes the DSH fence');
+const last = seen.at(-1);
+assert.equal(last.host, `127.0.0.1:${upstreamPort}`); assert.equal(last.origin, `http://127.0.0.1:${upstreamPort}`);
+assert.doesNotMatch(last.cookie, /peer_link_gate/, 'gate cookie stripped before DSH');
+
+// 5. cross-site API request refused
+r = await fetch(base + '/api/echo', { method: 'POST', headers: { cookie: jar, origin: 'http://evil.example', 'content-type': 'application/json' }, body: '{}' });
+assert.equal(r.status, 403);
+
+// 6. forged / tampered gate refused
+const forged = jar.replace(/peer_link_gate=(\d+)\.[0-9a-f]+/, (_, e) => `peer_link_gate=${e}.${'0'.repeat(64)}`);
+r = await get('/api/echo', { cookie: forged });
+assert.equal(r.status, 401);
+
+// 7. stale DSH cookie (DSH restarted) → re-login page once
+const stale = jar.replace(/dsh-auth-abc=[^;]+/, 'dsh-auth-abc=old');
+r = await get('/some/page', { accept: 'text/html', cookie: stale });
+assert.equal(r.status, 200);
+assert.match(await r.text(), /location\.replace\("\/some\/page"\)/);
+assert.match(cookiesOf(r), /dsh-auth-abc=ok-/);
+
+// 8. WebSocket upgrade through relay (gated)
+const ws = await new Promise((resolve, reject) => {
+  const sock = net.connect(server.port, '127.0.0.1', () => {
+    sock.write(`GET /api/ws HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nOrigin: ${base}\r\nCookie: ${jar}\r\n\r\n`);
+  });
+  let buf = '';
+  sock.on('data', (d) => {
+    buf += d;
+    if (buf.includes('\r\n\r\n') && !buf.includes('PING')) { sock.write('PING'); }
+    if (buf.includes('PING')) { sock.destroy(); resolve(buf); }
+  });
+  sock.on('error', reject);
+  setTimeout(() => reject(new Error('ws timeout: ' + buf)), 3000);
+});
+assert.match(ws, /101 Switching/); assert.match(ws, /PING/);
+const wsDenied = await new Promise((resolve) => {
+  const sock = net.connect(server.port, '127.0.0.1', () => sock.write(`GET /api/ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n`));
+  let buf = ''; sock.on('data', (d) => (buf += d)); sock.on('close', () => resolve(buf));
+});
+assert.match(wsDenied, /403/);
+
+// 9. protocol still works, unsigned protocol still refused
+r = await fetch(base + '/peer/v1/info', { method: 'POST', body: '{}' });
+assert.equal(r.status, 401);
+
+// 10. sharing switched off
+enabled = false;
+await assert.rejects(client.call('webTicket', {}), /does not share its web page/);
+r = await get('/', { accept: 'text/html', cookie: jar });
+assert.equal(r.status, 404);
+assert.equal((await client.call('info')).web, false);
+
+
+// 11. the gate is bound to the browser's address: the same cookie from another address is refused
+const lan = Object.values((await import('node:os')).networkInterfaces()).flat().find((i) => i?.family === 'IPv4' && !i.internal)?.address;
+if (lan) {
+  enabled = true;
+  const wide = await startServer({ ctx: { logger }, ops, state, host: '0.0.0.0', port: 0, allowCidrs: `127.0.0.0/8, ${lan}/32`, web });
+  const t2 = await client.call('webTicket', {});
+  const loop = await fetch(`http://127.0.0.1:${wide.port}${t2.path}`, { redirect: 'manual' });
+  const loopJar = loop.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+  assert.equal((await fetch(`http://127.0.0.1:${wide.port}/api/echo`, { headers: { cookie: loopJar } })).status, 200);
+  assert.equal((await fetch(`http://${lan}:${wide.port}/api/echo`, { headers: { cookie: loopJar } })).status, 401, 'cookie replayed from another address');
+  await wide.close();
+}
+await server.close();
+dsh.close();
+}
 console.log('peer-link protocol tests passed');

@@ -21,6 +21,7 @@ description: 通过 DSH 互联插件（dsh-peer-link）把任务交给局域网�
 | 一两句就能答完、要当场拿结果 | `peer_dsh action=run`，同步等待，默认最多 600 秒（`wait_seconds` 可调）。 |
 | 续接不是由子代理开的对端会话 | `peer_dsh action=run session_id=<id>`。 |
 | 看对端会话原文、列会话、停止 | `peer_dsh action=read` / `sessions` / `cancel`。 |
+| 用户想自己看、自己操作对端 | 不用工具。告诉用户点侧边栏底部的「对端设备」（或子代理会话标题栏的「在 <对端> 上查看」），会在浏览器里打开对端的 DSH 网页。 |
 
 ## 写委派任务
 
@@ -47,6 +48,7 @@ description: 通过 DSH 互联插件（dsh-peer-link）把任务交给局域网�
 - **`bad signature (secret mismatch?)`**：配对已失效（例如对方重装后密钥变了），请用户重新配对。
 - **`clock skew too large`**：两台机器时钟相差超过 5 分钟，请用户同步系统时间。
 - **图片、附件传不过去**：插件只传文本。需要文件时让对端自己按路径读，或把内容写进任务。
+- **「对端设备」里提示对方未开启共享或版本过旧**：请用户在对方机器的插件设置里打开「共享网页界面」，或把对方的 dsh-peer-link 升级到 0.4.0 以上。
 
 ## 配对
 

@@ -92,7 +92,14 @@ export class SessionOps {
       node: process.version,
       pid: process.pid,
       time: Date.now(),
+      web: this.web?.available() ?? false,
     };
+  }
+
+  /** One-time entry link to this machine's Web page; see web-share.js. */
+  webTicket(args) {
+    if (this.web === undefined) throw new PeerError('UNAVAILABLE', 'this machine cannot share its web page', 503);
+    return this.web.issue(args?.sessionId);
   }
 
   /** Pairing handshake: the caller already proved it knows our secret and hands us its own code. */
@@ -353,10 +360,13 @@ export class SessionOps {
   }
 }
 
-const OPS = new Set(['info', 'hello', 'run', 'status', 'wait', 'cancel', 'sessions', 'read']);
+const OPS = new Set(['info', 'hello', 'run', 'status', 'wait', 'cancel', 'sessions', 'read', 'webTicket']);
 
-/** Start the LAN listener; resolves to `{ close, address }`. */
-export async function startServer({ ctx, ops, state, host, port, allowCidrs }) {
+/**
+ * Start the LAN listener; resolves to `{ close, address }`. `/peer/*` is the
+ * signed protocol; with `web`, every other path is the shared Web page.
+ */
+export async function startServer({ ctx, ops, state, host, port, allowCidrs, web }) {
   const allow = buildAllowList(allowCidrs);
   const nonces = new NonceCache();
   const failures = new Map();
@@ -370,6 +380,16 @@ export async function startServer({ ctx, ops, state, host, port, allowCidrs }) {
     const url = new URL(req.url ?? '/', 'http://peer');
     if (req.method === 'GET' && url.pathname === '/peer/ping') {
       sendJson(res, 200, { ok: true, service: 'dsh-peer-link', v: 1 });
+      return;
+    }
+    if (web !== undefined && !url.pathname.startsWith('/peer/')) {
+      try {
+        await web.handle(req, res, url);
+      } catch (error) {
+        ctx.logger.warn(`peer-link: web page: ${error.message}`);
+        if (!res.headersSent) res.writeHead(500);
+        res.end();
+      }
       return;
     }
     if (req.method !== 'POST' || !url.pathname.startsWith(API_PREFIX)) {
@@ -409,7 +429,17 @@ export async function startServer({ ctx, ops, state, host, port, allowCidrs }) {
     }
   });
   server.keepAliveTimeout = 5_000;
-  server.requestTimeout = 60_000;
+  // Uploads through the shared Web page may take longer than a minute to arrive.
+  server.requestTimeout = web === undefined ? 60_000 : 10 * 60_000;
+  if (web !== undefined) {
+    server.on('upgrade', (req, socket, head) => {
+      if (!allow.check(normalizeIp(req.socket.remoteAddress))) {
+        socket.destroy();
+        return;
+      }
+      web.upgrade(req, socket, head);
+    });
+  }
 
   const listen = (target) =>
     new Promise((resolve, reject) => {
@@ -433,6 +463,7 @@ export async function startServer({ ctx, ops, state, host, port, allowCidrs }) {
     port: server.address().port,
     close: () =>
       new Promise((resolve) => {
+        web?.closeSockets();
         server.closeAllConnections?.();
         server.close(() => resolve());
       }),
