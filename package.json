@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-peer-link",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Link DeepSeek Harness instances on the LAN: delegate subagents to another machine's DSH, continue its sessions, and open its web page.",
   "repository": {
@@ -28,6 +28,8 @@
     "peer-client.js",
     "protocol.js",
     "state.js",
+    "relay.js",
+    "frpc-bin.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

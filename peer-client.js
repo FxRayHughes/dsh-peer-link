@@ -6,12 +6,16 @@ import { API_PREFIX, parseHint, PeerError, signedHeaders, verifyResponse } from 
  *
  * The peer's port is random, so the cached address can go stale. A call tries
  * the cached address, then asks discovery, then the pairing hints that carry a
- * port. Only a response signed with the peer's secret counts as reaching it,
- * so a different program that took over an old port is skipped.
+ * port, and finally the relay (relay.js), which reaches peers off this LAN by
+ * P2P or through frps. A peer last reached only through the relay gets the
+ * relay first. Only a response signed with the peer's secret counts as
+ * reaching it, so a different program that took over an old port is skipped.
  */
 
 const PROBE_TIMEOUT_MS = 4_000;
 const CONNECT_TIMEOUT_MS = 2_000;
+// The relay's xtcp visitor waits for a hole, then falls back to frps.
+const RELAY_PROBE_TIMEOUT_MS = 12_000;
 
 function tcpReachable(addr, timeoutMs) {
   const target = parseHint(addr);
@@ -29,11 +33,14 @@ function tcpReachable(addr, timeoutMs) {
 }
 
 export class PeerClient {
-  constructor(state, peer, logger, discovery) {
+  constructor(state, peer, logger, discovery, relay) {
     this.state = state;
     this.peer = peer;
     this.logger = logger;
     this.discovery = discovery;
+    this.relay = relay;
+    /** How the last successful call got there: `lan`, `p2p`, or `relay`. */
+    this.route = undefined;
   }
 
   /** One request to one address; resolves `{ reached, value | error }`. */
@@ -72,6 +79,15 @@ export class PeerClient {
   async *candidates(signal) {
     const tried = new Set();
     const fresh = (addr) => addr !== undefined && !tried.has(addr) && (tried.add(addr), true);
+    const relayed = async () => {
+      if (this.relay === undefined) return undefined;
+      await this.relay.prepare(this.peer, signal);
+      return this.relay.addrOf(this.peer);
+    };
+    if (this.relay?.preferred(this.peer)) {
+      const addr = await relayed();
+      if (fresh(addr)) yield addr;
+    }
     if (fresh(this.peer.addr)) yield this.peer.addr;
     if (this.discovery !== undefined) {
       for (const addr of await this.discovery.find(this.peer, { signal })) if (fresh(addr)) yield addr;
@@ -79,42 +95,52 @@ export class PeerClient {
     for (const hint of this.peer.hints ?? []) {
       if (parseHint(hint)?.port !== undefined && fresh(hint)) yield hint;
     }
+    const addr = await relayed();
+    if (fresh(addr)) yield addr;
   }
 
   async call(op, args = {}, { signal, timeoutMs = 40_000 } = {}) {
     const failures = [];
     for await (const addr of this.candidates(signal)) {
+      const viaRelay = this.relay?.owns(addr) === true;
       // A host that went away can leave a TCP connect hanging for the whole
-      // request timeout; fail fast so discovery gets its turn.
-      if (!(await tcpReachable(addr, CONNECT_TIMEOUT_MS))) {
+      // request timeout; fail fast so discovery gets its turn. The relay's
+      // visitor always accepts, so it is judged by the request itself.
+      if (!viaRelay && !(await tcpReachable(addr, CONNECT_TIMEOUT_MS))) {
         failures.push(`${addr}: no TCP answer`);
         continue;
       }
-      const result = await this.attempt(addr, op, args, { signal, timeoutMs });
+      const result = await this.attempt(addr, op, args, { signal, timeoutMs: viaRelay ? Math.max(timeoutMs, RELAY_PROBE_TIMEOUT_MS) : timeoutMs });
       if (!result.reached) {
-        failures.push(result.error);
+        failures.push(viaRelay ? `relay ${this.state.relay?.server ?? ''}: ${result.error.replace(`${addr}: `, '')}` : result.error);
         continue;
       }
-      if (addr !== this.peer.addr) {
-        this.state.rememberAddr(this.peer.name, addr);
-        this.peer.addr = addr;
+      if (viaRelay) {
+        this.relay.noteRelay(this.peer);
+        this.route = this.relay.routeOf(this.peer);
+      } else {
+        this.relay?.noteLan(this.peer);
+        this.route = 'lan';
+        if (addr !== this.peer.addr) {
+          this.state.rememberAddr(this.peer.name, addr);
+          this.peer.addr = addr;
+        }
       }
       if (result.error) throw result.error;
       return result.value;
     }
     const detail = failures.length ? failures.join('; ') : 'no address known and discovery got no answer';
-    throw new PeerError(
-      'UNREACHABLE',
-      `${this.peer.name} unreachable (${detail}). Check that its DSH is running with peer-link enabled, both machines share a LAN, and its firewall allows DSH.`,
-      502,
-    );
+    const hint = this.relay?.status().configured
+      ? 'Check that its DSH is running with peer-link enabled and logged in to the same relay.'
+      : 'Check that its DSH is running with peer-link enabled, both machines share a LAN (or set up a relay in the peer-link settings), and its firewall allows DSH.';
+    throw new PeerError('UNREACHABLE', `${this.peer.name} unreachable (${detail}). ${hint}`, 502);
   }
 
   /** Quick reachability probe used by `peers` listings. */
   async probe() {
     try {
       const info = await this.call('info', {}, { timeoutMs: PROBE_TIMEOUT_MS });
-      return { online: true, info };
+      return { online: true, info, route: this.route };
     } catch (error) {
       return { online: false, error: error.message };
     }

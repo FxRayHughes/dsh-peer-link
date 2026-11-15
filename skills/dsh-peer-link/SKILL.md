@@ -1,6 +1,6 @@
 ---
 name: dsh-peer-link
-description: 通过 DSH 互联插件（dsh-peer-link）把任务交给局域网里另一台已配对机器上的 DeepSeek Harness 执行，例如在 Windows 上跑命令、查那台机器的文件、环境或已装软件，以及续接、查看、停止对端会话。当用户提到另一台电脑、Windows、对端或 peer，要在那台机器上做什么时使用。需要当前环境有 subagent_peer 或 peer_dsh 工具。
+description: 通过 DSH 互联插件（dsh-peer-link）把任务交给另一台已配对机器（局域网直连，或经 frps 中继 P2P/中转）上的 DeepSeek Harness 执行，例如在 Windows 上跑命令、查那台机器的文件、环境或已装软件，以及续接、查看、停止对端会话。当用户提到另一台电脑、Windows、对端或 peer，要在那台机器上做什么时使用。需要当前环境有 subagent_peer 或 peer_dsh 工具。
 ---
 
 # 委派到对端 DSH
@@ -42,7 +42,8 @@ description: 通过 DSH 互联插件（dsh-peer-link）把任务交给局域网�
 
 ## 常见问题
 
-- **对端 offline 或 lost contact**：对端 DSH 没运行、不在同一局域网，或防火墙挡了端口。"may still be running" 表示对端可能还在跑，稍后 `read`。
+- **对端 offline 或 lost contact**：对端 DSH 没运行、不在同一局域网，或防火墙挡了端口。"may still be running" 表示对端可能还在跑，稍后 `read`。不在同一局域网时，请用户在 设置 → 插件 → DSH 互联 →「跨网络连接」填 frps 中继（本机已用 FRP 端口映射时可一键套用），再在对方机器重新粘贴一次本机配对码；之后先 P2P、不通再经服务器中转。`peer_dsh action=peers` 的 route 显示当前是 lan / p2p / relay。
+- **中继状态 error 或一直 starting**：frps 地址、token 或 TLS 不对，或者 frpc 下载失败（设置页显示原因；可手动把 frpc 放进 `~/.dsh/peer-link/bin/`）。
 - **Windows 上命令以 `0xC0000142`（3221225794）失败，或任务卡住不动**：对端会话处在沙箱里或在等审批。请用户在 Windows 端的插件设置里把「对端会话的权限预设」设为 `danger-full-access`（安装后的授权弹窗选"允许"也行）。只对之后新开的会话生效，所以要重新委派。
 - **`specify a peer: A, B`**：配对了多台但没设默认对端。可以改用 `peer_dsh action=run peer=<名称>`，或请用户在设置页选默认对端。
 - **`bad signature (secret mismatch?)`**：配对已失效（例如对方重装后密钥变了），请用户重新配对。

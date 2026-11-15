@@ -1,6 +1,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import { createHmac, randomBytes } from 'node:crypto';
+import { keyIdOf } from './discovery.js';
 import { normalizeIp, PeerError, safeEqualHex } from './protocol.js';
 
 /**
@@ -85,8 +86,8 @@ function send(res, page) {
   res.end(page.body);
 }
 
-/** Request headers as the local DSH listener should see them. */
-function rewriteHeaders(headers, upstream) {
+/** Request headers as the local DSH listener should see them; `ns` is WebShare.cookieNs(). */
+function rewriteHeaders(headers, upstream, ns) {
   const out = { ...headers, host: upstream.host };
   if (out.origin) out.origin = upstream.origin;
   if (out.referer) {
@@ -98,15 +99,23 @@ function rewriteHeaders(headers, upstream) {
     }
   }
   if (typeof out.cookie === 'string') {
+    // Only cookies this relay set reach DSH, with their own names back. The
+    // rest belong to other pages on this host, such as the browser's own DSH.
     const kept = out.cookie
       .split(';')
-      .filter((part) => part.split('=')[0].trim() !== GATE_COOKIE)
-      .join(';')
-      .trim();
+      .map((part) => part.trim())
+      .filter((part) => part.startsWith(ns))
+      .map((part) => part.slice(ns.length))
+      .join('; ');
     if (kept) out.cookie = kept;
     else delete out.cookie;
   }
   return out;
+}
+
+/** DSH's `Set-Cookie` lines with each name moved under `ns`. */
+function renameCookies(lines, ns) {
+  return (lines ?? []).map((line) => ns + line.trimStart());
 }
 
 export class WebShare {
@@ -127,6 +136,20 @@ export class WebShare {
     this.sockets = new Set();
   }
 
+  /**
+   * Cookies ignore the port, and through the relay every peer's page is on
+   * 127.0.0.1, next to the others and to the browser's own DSH. So the gate
+   * and DSH's cookies carry this machine's key id in their names: two pages
+   * never overwrite each other's login, and none is sent to the wrong DSH.
+   */
+  gateName() {
+    return `${GATE_COOKIE}_${keyIdOf(this.secret())}`;
+  }
+
+  cookieNs() {
+    return `plk_${keyIdOf(this.secret())}_`;
+  }
+
   gateKey() {
     return createHmac('sha256', this.secret()).update('peer-link web gate').digest();
   }
@@ -136,7 +159,7 @@ export class WebShare {
   }
 
   gateOk(req) {
-    const value = readCookie(req.headers.cookie, GATE_COOKIE);
+    const value = readCookie(req.headers.cookie, this.gateName());
     if (value === undefined) return false;
     const expiresAt = Number(value.split('.')[0]);
     if (!Number.isSafeInteger(expiresAt) || expiresAt < Date.now()) return false;
@@ -175,7 +198,7 @@ export class WebShare {
         },
         (response) => {
           response.resume();
-          const cookies = response.headers['set-cookie'] ?? [];
+          const cookies = renameCookies(response.headers['set-cookie'], this.cookieNs());
           if (response.statusCode === 303 && cookies.length > 0) resolve(cookies);
           else reject(new Error(`DSH refused the launch token (HTTP ${response.statusCode})`));
         },
@@ -189,7 +212,7 @@ export class WebShare {
   gateCookie(req) {
     const expiresAt = Date.now() + GATE_TTL_S * 1000;
     const value = this.gateValue(expiresAt, normalizeIp(req.socket.remoteAddress));
-    return `${GATE_COOKIE}=${value}; Path=/; Max-Age=${GATE_TTL_S}; HttpOnly; SameSite=Strict`;
+    return `${this.gateName()}=${value}; Path=/; Max-Age=${GATE_TTL_S}; HttpOnly; SameSite=Strict`;
   }
 
   async enter(req, res, url) {
@@ -280,7 +303,7 @@ export class WebShare {
         port: Number(target.port || 80),
         method: req.method,
         path: req.url,
-        headers: rewriteHeaders(req.headers, target),
+        headers: rewriteHeaders(req.headers, target, this.cookieNs()),
       },
       (proxyRes) => {
         // After a DSH restart the old login cookie stops working; log in again
@@ -294,7 +317,9 @@ export class WebShare {
             .catch((error) => send(res, messagePage(502, `无法登录这台电脑上的 DSH：${error.message}`)));
           return;
         }
-        res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+        const headers = { ...proxyRes.headers };
+        if (headers['set-cookie']) headers['set-cookie'] = renameCookies(headers['set-cookie'], this.cookieNs());
+        res.writeHead(proxyRes.statusCode ?? 502, headers);
         proxyRes.pipe(res);
       },
     );
@@ -318,7 +343,7 @@ export class WebShare {
     const target = new URL(upstream.origin);
     const upstreamSocket = net.connect(Number(target.port || 80), target.hostname, () => {
       let raw = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
-      for (const [key, value] of Object.entries(rewriteHeaders(req.headers, target))) {
+      for (const [key, value] of Object.entries(rewriteHeaders(req.headers, target, this.cookieNs()))) {
         for (const v of Array.isArray(value) ? value : [value]) raw += `${key}: ${v}\r\n`;
       }
       upstreamSocket.write(`${raw}\r\n`);

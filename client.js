@@ -91,6 +91,29 @@ window.__ModuleLoader__.load({
       offline: '离线',
       webOff: '对方没有开启「共享网页界面」',
       webOld: '对方的 DSH 互联版本过旧，升级到 0.4.0 或更高后才能打开网页',
+      relayTitle: '跨网络连接',
+      relayIntro: '两台不在同一局域网时，经一台 frps 服务器连接：先尝试 P2P 直连（打洞），打不通再由服务器中转。通信仍然用配对密钥签名，并且端到端加密。',
+      relaySwitch: '启用跨网络连接',
+      relaySwitchHint: '关闭后只在局域网内连接。',
+      relayServer: '中继服务器',
+      relayServerHint: 'frps 的地址和端口，例如 frp.example.com:7000。配对码会带上这些设置，对端粘贴后自动使用，不用再填。',
+      relayStatus: '状态',
+      relayToken: 'auth.token',
+      relayTokenKept: '已保存（留空则不修改）',
+      relayUser: 'frps 用户（可选）',
+      relayTls: 'TLS',
+      relaySave: '保存并连接',
+      relayClear: '移除',
+      relayUseFrp: '使用 FRP 端口映射的服务器（{server}）',
+      relayNone: '未设置',
+      relayOff: '已关闭',
+      relayStarting: '正在连接…',
+      relayOnline: '已连接 {server}',
+      relayError: '连接失败：{message}',
+      relayRecode: '改了中继设置后，请把新的配对码再给对端粘贴一次。',
+      routeLan: '局域网',
+      routeP2p: 'P2P',
+      routeRelay: '中转',
     };
     const en = {
       summary: 'Link DSH instances on the LAN: delegate subagents and continue remote sessions',
@@ -177,6 +200,29 @@ window.__ModuleLoader__.load({
       offline: 'Offline',
       webOff: 'The other machine does not share its web page',
       webOld: 'The other machine runs an older peer link; it needs 0.4.0 or later to open its page',
+      relayTitle: 'Across networks',
+      relayIntro: 'When the machines are not on one LAN they meet on an frps server: a direct P2P connection (hole punching) is tried first, and the server relays when that fails. Calls stay signed with the pairing key and encrypted end to end.',
+      relaySwitch: 'Connect across networks',
+      relaySwitchHint: 'Off: connect on the LAN only.',
+      relayServer: 'Relay server',
+      relayServerHint: 'frps host and port, e.g. frp.example.com:7000. The pairing code carries these settings, so the other machine uses them without setup.',
+      relayStatus: 'Status',
+      relayToken: 'auth.token',
+      relayTokenKept: 'Saved (leave empty to keep)',
+      relayUser: 'frps user (optional)',
+      relayTls: 'TLS',
+      relaySave: 'Save and connect',
+      relayClear: 'Remove',
+      relayUseFrp: 'Use the FRP tunnel\'s server ({server})',
+      relayNone: 'Not set',
+      relayOff: 'Off',
+      relayStarting: 'Connecting…',
+      relayOnline: 'Connected to {server}',
+      relayError: 'Failed: {message}',
+      relayRecode: 'After changing the relay, paste the new pairing code on the other machine once more.',
+      routeLan: 'LAN',
+      routeP2p: 'P2P',
+      routeRelay: 'relayed',
     };
 
     const NS = 'peer-link';
@@ -369,6 +415,13 @@ window.__ModuleLoader__.load({
       return text.replace(/\{(\w+)\}/g, (_, k) => (vars[k] ?? ''));
     }
 
+    /** How a probed peer was reached: LAN, P2P through the relay, or relayed by frps. */
+    function routeLabel(t, peer) {
+      if (peer.route === 'p2p') return t('routeP2p');
+      if (peer.route === 'relay') return t('routeRelay');
+      return peer.route === 'lan' ? t('routeLan') : '';
+    }
+
     function readValue(form) {
       const state = form?.state;
       if (!state) return {};
@@ -541,7 +594,9 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, [armed]);
       const remote = peer.remote;
-      const detail = [peer.addr, remote ? `${remote.platform} · ${remote.hostname}` : peer.platform].filter(Boolean).join(' · ');
+      const via = routeLabel(t, peer);
+      const where = peer.route === 'lan' || peer.route === undefined ? peer.addr : via;
+      const detail = [where, remote ? `${remote.platform} · ${remote.hostname}` : peer.platform].filter(Boolean).join(' · ');
       const unpair = () => {
         if (!armed) {
           setArmed(true);
@@ -708,6 +763,157 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', className: 'pl-btn', onClick: toggleOwn }, t('hideCode')),
                 ),
               ),
+        ),
+      );
+    }
+
+    /**
+     * The frps relay for peers off the LAN. Server settings live in the
+     * plugin's state (they travel in the pairing code); the on/off switch is
+     * the `relay` Config field.
+     */
+    function RelaySection({ t, form, onChanged }) {
+      const [status, setStatus] = useState(null);
+      const [server, setServer] = useState('');
+      const [token, setToken] = useState('');
+      const [user, setUser] = useState('');
+      const [tls, setTls] = useState(true);
+      const [busy, setBusy] = useState(false);
+      const [note, setNote] = useState(null);
+      const seeded = useRef(false);
+
+      const load = useCallback(
+        () =>
+          rpc('relay')
+            .then((value) => {
+              setStatus(value);
+              if (!seeded.current) {
+                seeded.current = true;
+                setServer(value.server ?? '');
+                setUser(value.user ?? '');
+                setTls(value.tls !== false);
+              }
+              return value;
+            })
+            .catch((error) => setNote({ ok: false, text: fill(t('error'), { message: error.message }) })),
+        [],
+      );
+      useEffect(() => {
+        load();
+      }, [load]);
+      // frpc logs in a moment after it starts.
+      useEffect(() => {
+        if (status?.phase !== 'starting') return undefined;
+        const timer = setTimeout(load, 1500);
+        return () => clearTimeout(timer);
+      }, [status, load]);
+
+      const apply = (args) => {
+        setBusy(true);
+        setNote(null);
+        rpc('setRelay', args)
+          .then((value) => {
+            seeded.current = false;
+            setToken('');
+            setNote(args.clear ? null : { ok: true, text: t('relayRecode') });
+            onChanged();
+            return load().then(() => value);
+          })
+          .catch((error) => setNote({ ok: false, text: fill(t('error'), { message: error.message }) }))
+          .finally(() => setBusy(false));
+      };
+
+      const enabled = readValue(form).relay !== false;
+      const writable = form?.state?.writable !== false;
+      const toggle = async (next) => {
+        if (!form) return;
+        setBusy(true);
+        try {
+          await form.mutate([{ op: 'set', path: ['relay'], value: next }], form.state?.revision);
+        } finally {
+          setBusy(false);
+          setTimeout(load, 800);
+        }
+      };
+
+      let state = t('relayNone');
+      let dot = 'pl-dot';
+      if (status?.configured) {
+        if (!status.enabled) state = t('relayOff');
+        else if (status.phase === 'online') {
+          state = fill(t('relayOnline'), { server: status.server });
+          dot = 'pl-dot on';
+        } else if (status.phase === 'error') {
+          state = fill(t('relayError'), { message: status.error ?? '' });
+          dot = 'pl-dot off';
+        } else state = t('relayStarting');
+      }
+
+      return h(
+        'section',
+        { className: 'pl-section' },
+        h('h4', { className: 'pl-title' }, t('relayTitle')),
+        h(
+          'div',
+          { className: 'pl-card' },
+          h(Row, { label: t('relaySwitch'), hint: t('relayIntro') }, h(Switch, { checked: enabled, disabled: !writable || busy, label: t('relaySwitch'), onChange: toggle })),
+          h(Row, { label: t('relayStatus') }, h('span', { className: 'pl-hint pl-value' }, status ? h('span', { className: dot }) : null, status ? state : '…')),
+          h(
+            Row,
+            { label: t('relayServer'), hint: t('relayServerHint'), stack: true },
+            h('input', {
+              className: 'pl-input pl-mono',
+              type: 'text',
+              value: server,
+              placeholder: 'frp.example.com:7000',
+              disabled: busy,
+              autoComplete: 'off',
+              spellCheck: false,
+              'aria-label': t('relayServer'),
+              onChange: (event) => setServer(event.target.value),
+            }),
+            h(
+              'div',
+              { className: 'pl-inline' },
+              h('input', {
+                className: 'pl-input',
+                type: 'password',
+                value: token,
+                placeholder: status?.hasToken ? t('relayTokenKept') : t('relayToken'),
+                disabled: busy,
+                autoComplete: 'new-password',
+                'aria-label': t('relayToken'),
+                onChange: (event) => setToken(event.target.value),
+              }),
+              h('input', {
+                className: 'pl-input',
+                type: 'text',
+                value: user,
+                placeholder: t('relayUser'),
+                disabled: busy,
+                autoComplete: 'off',
+                spellCheck: false,
+                'aria-label': t('relayUser'),
+                onChange: (event) => setUser(event.target.value),
+              }),
+              h(
+                'label',
+                { className: 'pl-hint pl-inline' },
+                h('input', { type: 'checkbox', checked: tls, disabled: busy, onChange: (event) => setTls(event.target.checked) }),
+                t('relayTls'),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'pl-inline' },
+              h('button', { type: 'button', className: 'pl-btn primary', disabled: busy || server.trim() === '', onClick: () => apply({ server, token, user, tls }) }, t('relaySave')),
+              status?.suggestion
+                ? h('button', { type: 'button', className: 'pl-btn', disabled: busy, onClick: () => apply({ useSuggestion: true }) }, fill(t('relayUseFrp'), { server: status.suggestion }))
+                : null,
+              status?.configured ? h('button', { type: 'button', className: 'pl-btn danger', disabled: busy, onClick: () => apply({ clear: true }) }, t('relayClear')) : null,
+            ),
+            note ? h('div', { className: note.ok ? 'pl-note ok' : 'pl-note err', role: 'status' }, note.text) : null,
+          ),
         ),
       );
     }
@@ -971,7 +1177,8 @@ window.__ModuleLoader__.load({
                 const probed = probes[listed.name];
                 const peer = probed ?? listed;
                 const blocker = probed === undefined ? undefined : webBlocker(peer);
-                const detail = peer.remote ? `${peer.remote.platform} · ${peer.addr ?? ''}` : peer.addr ?? '';
+                const where = peer.route === 'lan' || peer.route === undefined ? peer.addr ?? '' : routeLabel(t, peer);
+                const detail = peer.remote ? `${peer.remote.platform} · ${where}` : where;
                 return h(
                   'button',
                   {
@@ -1102,6 +1309,7 @@ window.__ModuleLoader__.load({
         h(StatusSection, { t, self: data.self }),
         h(PeersSection, { t, data, reload }),
         h(PairSection, { t, onPaired: reload }),
+        h(RelaySection, { t, form, onChanged: reload }),
         h(SettingsSections, { t, form, peers: data.peers, presets, onSaved: reload }),
       );
     }

@@ -93,6 +93,7 @@ export class SessionOps {
       pid: process.pid,
       time: Date.now(),
       web: this.web?.available() ?? false,
+      relay: this.state.relay !== undefined,
     };
   }
 
@@ -107,10 +108,14 @@ export class SessionOps {
     if (typeof args?.code !== 'string') return { paired: false, name: this.getConfig().displayName };
     const peer = decodeCode(args.code);
     // The caller's port comes from its code; its host is the address we actually saw.
+    // A call through the relay arrives from loopback, which says nothing about where the caller is.
     const port = peer.hints.map((hint) => parseHint(hint)?.port).find((p) => p !== undefined);
-    const addr = args.remoteIp && port !== undefined ? `${args.remoteIp}:${port}` : undefined;
+    const lan = args.remoteIp && !args.remoteIp.startsWith('127.') && args.remoteIp !== '::1';
+    const addr = lan && port !== undefined ? `${args.remoteIp}:${port}` : undefined;
     this.state.upsertPeer({ ...peer, addr });
-    this.ctx.logger.info(`peer-link: paired with "${peer.name}" (${addr ?? peer.hints.join(', ')})`);
+    if (peer.relay && this.state.relay === undefined) this.state.relay = peer.relay;
+    this.relay?.sync();
+    this.ctx.logger.info(`peer-link: paired with "${peer.name}" (${addr ?? (lan ? peer.hints.join(', ') : 'through the relay')})`);
     return { paired: true, name: this.getConfig().displayName };
   }
 

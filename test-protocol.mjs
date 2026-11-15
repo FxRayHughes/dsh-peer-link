@@ -361,7 +361,7 @@ const html = await r.text();
 assert.match(html, /location\.replace\("\/#peer-link-session=sess-123"\)/);
 assert.doesNotMatch(html, new RegExp(TOKEN), 'launch token never reaches the browser');
 const jar = cookiesOf(r);
-assert.match(jar, /peer_link_gate=/); assert.match(jar, /dsh-auth-abc=/);
+assert.match(jar, /peer_link_gate_[0-9a-f]{16}=/); assert.match(jar, /plk_[0-9a-f]{16}_dsh-auth-abc=/, 'DSH cookies renamed per machine');
 
 // 3. ticket is single-use
 r = await get(t1.path, { accept: 'text/html' });
@@ -381,7 +381,7 @@ r = await fetch(base + '/api/echo', { method: 'POST', headers: { cookie: jar, or
 assert.equal(r.status, 403);
 
 // 6. forged / tampered gate refused
-const forged = jar.replace(/peer_link_gate=(\d+)\.[0-9a-f]+/, (_, e) => `peer_link_gate=${e}.${'0'.repeat(64)}`);
+const forged = jar.replace(/(peer_link_gate_[0-9a-f]+)=(\d+)\.[0-9a-f]+/, (_, n, e) => `${n}=${e}.${'0'.repeat(64)}`);
 r = await get('/api/echo', { cookie: forged });
 assert.equal(r.status, 401);
 
@@ -437,7 +437,81 @@ if (lan) {
   assert.equal((await fetch(`http://${lan}:${wide.port}/api/echo`, { headers: { cookie: loopJar } })).status, 401, 'cookie replayed from another address');
   await wide.close();
 }
+// 12. through the relay every page is on 127.0.0.1: the browser's own DSH login is never forwarded
+enabled = true;
+const own = `dsh-auth-local=mine`;
+const t3 = await client.call('webTicket', {});
+const entered = cookiesOf(await get(t3.path, { accept: 'text/html' }));
+await get('/', { accept: 'text/html', cookie: `${own}; ${entered}` });
+assert.doesNotMatch(seen.at(-1).cookie, /dsh-auth-local/, 'foreign DSH cookie stays in the browser');
+assert.match(seen.at(-1).cookie, /^dsh-auth-abc=ok-/, 'own DSH cookie forwarded under its real name');
 await server.close();
 dsh.close();
+}
+
+// --- relay: pairing code, frpc config, routing --------------------------------
+{
+const { buildToml, Relay, proxyName } = await import('./relay.js');
+const { cleanRelay } = await import('./state.js');
+const relay = { server: 'frp.example.com:7000', token: 'tok"en', tls: true, user: '' };
+const code = encodeCode({ name: 'r', hints: ['10.0.0.2:5000'], secret: 'R'.repeat(43), relay });
+assert.deepEqual(decodeCode(code).relay, relay, 'pairing code carries the relay');
+assert.equal(decodeCode(encodeCode({ name: 'r', hints: [], secret: 'R'.repeat(43) })).relay, undefined);
+assert.equal(cleanRelay({ server: 'no-port' }), undefined);
+assert.equal(cleanRelay({ server: 'h:70000' }), undefined);
+assert.equal(cleanRelay({ server: '[::1]:7000' })?.server, '[::1]:7000');
+
+const toml = buildToml({
+  relay,
+  admin: { port: 7400, user: 'peer-link', password: 'pw' },
+  ownSecret: 'A'.repeat(43),
+  localPort: 5555,
+  visitors: [{ secret: 'B'.repeat(43), port: 6001 }],
+});
+assert.match(toml, /^serverAddr = "frp\.example\.com"$/m);
+assert.match(toml, /^auth\.token = "tok\\"en"$/m, 'strings are escaped');
+assert.match(toml, new RegExp(`name = "${proxyName('A'.repeat(43))}"\ntype = "xtcp"`));
+assert.match(toml, new RegExp(`name = "${proxyName('A'.repeat(43))}-s"\ntype = "stcp"`));
+assert.match(toml, new RegExp(`serverName = "${proxyName('B'.repeat(43))}"`));
+assert.match(toml, /bindPort = 6001\nkeepTunnelOpen = true\nfallbackTo = "plk-v-[0-9a-f]+-s"/);
+assert.equal((toml.match(/useEncryption = true/g) ?? []).length, 4);
+const keys = [...toml.matchAll(/secretKey = "([^"]+)"/g)].map((m) => m[1]);
+assert.equal(keys[0], keys[1]); assert.equal(keys[2], keys[3]); assert.notEqual(keys[0], keys[2]);
+assert.ok(!toml.includes('A'.repeat(43)) && !toml.includes('B'.repeat(43)), 'peer secrets never reach frpc');
+assert.doesNotMatch(buildToml({ relay, admin: { port: 1, user: 'u', password: 'p' }, ownSecret: 'A'.repeat(43), localPort: undefined, visitors: [] }), /\[\[proxies\]\]/);
+
+// A peer that is not on the LAN is reached through the relay's loopback visitor,
+// and that address is not remembered as a LAN address.
+const home = new PeerState();
+const far = new PeerState();
+far.data = { secret: newSecret(), peers: [] };
+const remoteOps = { info: () => ({ name: 'far' }) };
+const farServer = await startServer({ ctx: { logger: { info() {}, warn() {} } }, ops: remoteOps, state: far, host: '127.0.0.1', port: 0, allowCidrs: '127.0.0.0/8' });
+const peer = home.upsertPeer({ name: 'far', secret: far.secret, hints: ['192.0.2.1:9'], platform: 'win32' });
+const fake = {
+  ready: false,
+  prepare: async () => { fake.ready = true; },
+  addrOf: () => (fake.ready ? `127.0.0.1:${farServer.port}` : undefined),
+  owns: (addr) => addr === `127.0.0.1:${farServer.port}`,
+  noteRelay() { fake.relayed = true; },
+  noteLan() {},
+  preferred: () => false,
+  routeOf: () => 'p2p',
+  status: () => ({ configured: true }),
+};
+const farClient = new PeerClient(home, peer, { info() {}, warn() {} }, undefined, fake);
+assert.equal((await farClient.call('info', {}, { timeoutMs: 3000 })).name, 'far');
+assert.equal(farClient.route, 'p2p');
+assert.ok(fake.relayed);
+assert.equal(home.peer('far').addr, undefined, 'relay address not cached as LAN address');
+assert.ok(!home.peer('far').hints.some((h) => h.startsWith('127.')), 'relay address not added to hints');
+await farServer.close();
+
+// The Relay itself stays off without settings and reports it.
+const idle = new Relay({ state: home, logger: { info() {}, warn() {} }, localPort: () => 1, enabled: () => true });
+await idle.sync();
+assert.equal(idle.status().phase, 'off');
+assert.equal(idle.addrOf(peer), undefined);
+idle.close();
 }
 console.log('peer-link protocol tests passed');

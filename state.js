@@ -7,7 +7,7 @@ import { lanInterfaces, newSecret, parseHint, PeerError } from './protocol.js';
  * Plugin-owned pairing state, kept outside the Cordis profile so secrets never
  * enter `cordis.patch.yml` or the chat:
  *
- *   ~/.dsh/peer-link/state.json         { secret, peers: [{ name, secret, addr?, hints, platform, addedAt }] }
+ *   ~/.dsh/peer-link/state.json         { secret, relay?, peers: [{ name, secret, addr?, hints, platform, addedAt }] }
  *   ~/.dsh/peer-link/pairing-code.txt   this machine's pairing code (contains the secret)
  *
  * A peer's `addr` (`host:port`) is only a cache: the HTTP port is random, so
@@ -64,9 +64,27 @@ function hintsFromUrls(urls) {
   });
 }
 
-export function encodeCode({ name, hints, secret }) {
-  const json = JSON.stringify({ n: name, h: hints, k: secret, p: platform() });
-  return CODE_PREFIX + Buffer.from(json, 'utf8').toString('base64url');
+/**
+ * The frps server both machines meet on when they are not on one LAN:
+ * `{ server: 'host:port', token, tls, user }`, or undefined.
+ */
+export function cleanRelay(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const server = String(raw.server ?? '').trim();
+  const match = /^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):(\d{1,5})$/.exec(server);
+  if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) return undefined;
+  return {
+    server,
+    token: typeof raw.token === 'string' ? raw.token : '',
+    tls: raw.tls !== false,
+    user: typeof raw.user === 'string' ? raw.user.trim() : '',
+  };
+}
+
+export function encodeCode({ name, hints, secret, relay }) {
+  const data = { n: name, h: hints, k: secret, p: platform() };
+  if (relay) data.r = { a: relay.server, t: relay.token, s: relay.tls ? 1 : 0, u: relay.user || undefined };
+  return CODE_PREFIX + Buffer.from(JSON.stringify(data), 'utf8').toString('base64url');
 }
 
 export function decodeCode(code) {
@@ -84,6 +102,7 @@ export function decodeCode(code) {
     hints: cleanHints([...(data.h ?? []), ...hintsFromUrls(data.u)]),
     secret: data.k,
     platform: typeof data.p === 'string' ? data.p : undefined,
+    relay: data.r ? cleanRelay({ server: data.r.a, token: data.r.t, tls: data.r.s !== 0, user: data.r.u }) : undefined,
   };
 }
 
@@ -122,6 +141,7 @@ export class PeerState {
           secret: typeof parsed.secret === 'string' ? parsed.secret : '',
           lastPort: parsed.lastPort,
           ...(typeof parsed.accessDecision === 'string' ? { accessDecision: parsed.accessDecision } : {}),
+          ...(cleanRelay(parsed.relay) ? { relay: cleanRelay(parsed.relay) } : {}),
           peers: Array.isArray(parsed.peers) ? parsed.peers.map(cleanPeer).filter(Boolean) : [],
         };
       } catch {
@@ -176,6 +196,20 @@ export class PeerState {
     this.save();
   }
 
+  /** The frps relay for peers off the LAN; see relay.js. Travels in the pairing code. */
+  get relay() {
+    return this.load().relay;
+  }
+
+  set relay(relay) {
+    this.load();
+    const next = cleanRelay(relay);
+    if (JSON.stringify(next) === JSON.stringify(this.data.relay)) return;
+    if (next) this.data.relay = next;
+    else delete this.data.relay;
+    this.save();
+  }
+
   peers() {
     return this.load().peers;
   }
@@ -227,7 +261,7 @@ export class PeerState {
   /** Write this machine's pairing code for the given listener port and return it. */
   writePairingCode(name, port) {
     const hints = lanInterfaces().map((iface) => `${iface.address}:${port}`);
-    const code = encodeCode({ name, hints, secret: this.secret });
+    const code = encodeCode({ name, hints, secret: this.secret, relay: this.relay });
     writePrivate(PAIRING_FILE, `${code}\n`);
     return { code, hints };
   }

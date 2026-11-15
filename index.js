@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { Discovery, DISCOVERY_PORT } from './discovery.js';
 import { PeerClient } from './peer-client.js';
@@ -7,8 +8,9 @@ import { PeerError } from './protocol.js';
 import { LinkStore } from './links.js';
 import { PeerModelAdapter, PROVIDER } from './peer-model.js';
 import { followRun, PeerSubagentProvider } from './provider.js';
+import { Relay } from './relay.js';
 import { SessionOps, startServer } from './server.js';
-import { decodeCode, defaultDisplayName, PAIRING_FILE, PeerState, publicPeer } from './state.js';
+import { cleanRelay, decodeCode, defaultDisplayName, PAIRING_FILE, PeerState, publicPeer } from './state.js';
 import { RPC_PATH, webRoute } from './web.js';
 import { WebShare } from './web-share.js';
 
@@ -25,6 +27,8 @@ import { WebShare } from './web-share.js';
  *  - With `shareWeb`, the same listener also serves this DSH's Web page to
  *    paired peers' users through one-time links (see web-share.js), so the
  *    other machine's page and conversations open with one click.
+ *  - With a relay (an frps server, see relay.js), peers off this LAN are
+ *    reached by P2P hole punching, or through the server when that fails.
  *
  * Secrets live in ~/.dsh/peer-link/state.json (mode 0600), never in the profile.
  */
@@ -67,6 +71,11 @@ export const Config = z.object({
     .boolean()
     .default(true)
     .description('允许已配对的设备在局域网内打开本机的 DSH 网页界面（一次性链接进入，查看和操作本机的会话）')
+    .volatile(),
+  relay: z
+    .boolean()
+    .default(true)
+    .description('不在同一局域网时经中继服务器（frps）连接对端：先尝试 P2P 打洞，不通再由服务器中转。服务器在设置页填写，并随配对码带给对端')
     .volatile(),
 });
 
@@ -118,14 +127,22 @@ export function apply(ctx, config) {
   let appliedKey = '';
   let disposed = false;
   let queue = Promise.resolve();
+  const relay = new Relay({
+    state,
+    logger: ctx.logger,
+    localPort: () => listener?.port,
+    enabled: () => getConfig().relay !== false,
+  });
+  ops.relay = relay;
   const sync = () => {
     queue = queue
       .then(async () => {
         const cfg = getConfig();
         const key = disposed ? 'disposed' : JSON.stringify([cfg.listen, cfg.host, cfg.port, cfg.discoveryPort, cfg.allowCidrs]);
         if (key === appliedKey) {
-          // Only the display name may have changed.
+          // Only the display name or the relay switch may have changed.
           if (listener) state.writePairingCode(cfg.displayName, listener.port);
+          relay.sync();
           return;
         }
         if (listener) await listener.close();
@@ -133,11 +150,17 @@ export function apply(ctx, config) {
         listener = undefined;
         discovery = undefined;
         appliedKey = key;
-        if (disposed) return;
+        if (disposed) {
+          relay.close();
+          return;
+        }
 
         discovery = new Discovery({ state, logger: ctx.logger, port: cfg.discoveryPort, allowCidrs: cfg.allowCidrs });
         await discovery.start();
-        if (!cfg.listen) return;
+        if (!cfg.listen) {
+          relay.sync();
+          return;
+        }
         try {
           listener = await startServer({ ctx, ops, state, host: cfg.host, port: cfg.port || state.lastPort, allowCidrs: cfg.allowCidrs, web: ops.web });
         } catch (error) {
@@ -147,6 +170,7 @@ export function apply(ctx, config) {
         }
         state.lastPort = listener.port;
         discovery.setHttpPort(listener.port);
+        relay.sync();
         const { hints } = state.writePairingCode(cfg.displayName, listener.port);
         ctx.logger.info(
           `peer-link: listening on ${listener.address}, discovery ${discovery.bound ? `udp/${discovery.port}` : 'unavailable'}; pairing code in ${PAIRING_FILE} (${hints.join(', ')})`,
@@ -168,7 +192,7 @@ export function apply(ctx, config) {
   }, 'peer-link: LAN listener');
 
   // ---- Peer clients ---------------------------------------------------------
-  const clientFor = (peerName) => new PeerClient(state, state.peer(peerName), ctx.logger, discovery);
+  const clientFor = (peerName) => new PeerClient(state, state.peer(peerName), ctx.logger, discovery, relay);
 
   // ---- Subagent provider and its model route ------------------------------
   const adapter = new PeerModelAdapter({
@@ -189,12 +213,13 @@ export function apply(ctx, config) {
     listening: listener?.address ?? null,
     discovery: discovery?.bound ? `udp/${discovery.port}` : null,
     pairingCodeFile: PAIRING_FILE,
+    relay: relay.status(),
   });
 
   async function probePeer(peer, signal) {
-    const probe = await new PeerClient(state, peer, ctx.logger, discovery).probe();
+    const probe = await new PeerClient(state, peer, ctx.logger, discovery, relay).probe();
     if (signal?.aborted) throw signal.reason;
-    return { ...publicPeer(peer), online: probe.online, ...(probe.online ? { remote: probe.info } : { error: probe.error }) };
+    return { ...publicPeer(peer), online: probe.online, ...(probe.online ? { remote: probe.info, route: probe.route } : { error: probe.error }) };
   }
 
   async function listPeers(signal) {
@@ -215,23 +240,73 @@ export function apply(ctx, config) {
     if (alias) peer.name = alias;
     if (peer.secret === state.secret) throw new PeerError('BAD_INPUT', 'this is the pairing code of this machine itself; use the other machine\'s code');
     if (listener === undefined) throw new PeerError('UNAVAILABLE', 'enable listening first so the peer can call back');
+    // A code from a machine with a relay sets up the same relay here, so the
+    // two can find each other off the LAN without configuring this side.
+    if (peer.relay && state.relay === undefined) {
+      state.relay = peer.relay;
+      state.writePairingCode(getConfig().displayName, listener.port);
+    }
     const saved = state.upsertPeer(peer);
-    const client = new PeerClient(state, saved, ctx.logger, discovery);
+    const client = new PeerClient(state, saved, ctx.logger, discovery, relay);
     const own = state.writePairingCode(getConfig().displayName, listener.port);
     const reply = await client.call('hello', { code: own.code }, { signal, timeoutMs: 8_000 });
     const probe = await client.probe();
-    return { paired: saved.name, addr: client.peer.addr, reciprocal: reply.paired === true, remote: probe.info ?? probe.error };
+    return { paired: saved.name, addr: client.peer.addr, route: client.route, reciprocal: reply.paired === true, remote: probe.info ?? probe.error };
   }
 
   /**
    * A one-time link to a peer's Web page. The browser connects to the
-   * address this machine just reached the peer on, which is on the same LAN.
+   * address this machine just reached the peer on: its LAN address, or the
+   * relay's loopback visitor when the peer is elsewhere.
    * @param sessionId - the peer Session to open, when known.
    */
   async function openWeb(peerName, sessionId, signal) {
     const client = clientFor(peerName);
     const value = await client.call('webTicket', sessionId ? { sessionId } : {}, { signal, timeoutMs: 8_000 });
-    return { peer: client.peer.name, url: `http://${client.peer.addr}${value.path}`, expiresIn: value.expiresIn };
+    const addr = client.route === 'lan' ? client.peer.addr : relay.addrOf(client.peer);
+    return { peer: client.peer.name, url: `http://${addr}${value.path}`, expiresIn: value.expiresIn, route: client.route };
+  }
+
+  /** Relay settings from the page; the token is kept when left empty. */
+  async function setRelay(args) {
+    if (args.clear === true) {
+      state.relay = undefined;
+    } else {
+      const server = String(args.server ?? '').trim();
+      const next = cleanRelay({ server, token: args.token || state.relay?.token || '', tls: args.tls !== false, user: args.user });
+      if (next === undefined) throw new PeerError('BAD_INPUT', 'server must be host:port, e.g. frp.example.com:7000');
+      state.relay = next;
+    }
+    if (listener) state.writePairingCode(getConfig().displayName, listener.port);
+    await relay.sync();
+    await relay.whenReady();
+    return relay.status();
+  }
+
+  /**
+   * The frps server the FRP tunnel plugin is logged in to, offered as a
+   * one-click relay. Read from the frpc config it writes while running.
+   */
+  function relaySuggestion() {
+    let text;
+    try {
+      text = readFileSync(join(homedir(), '.dsh', 'frp-tunnel', 'frpc.toml'), 'utf8');
+    } catch {
+      return null;
+    }
+    const field = (key) => new RegExp(`^${key.replace('.', '\\.')}\\s*=\\s*(.+)$`, 'm').exec(text)?.[1]?.trim();
+    const string = (key) => {
+      const raw = field(key);
+      try {
+        return raw === undefined ? undefined : JSON.parse(raw);
+      } catch {
+        return undefined;
+      }
+    };
+    const host = string('serverAddr');
+    const port = Number(field('serverPort') ?? 7000);
+    if (!host) return null;
+    return cleanRelay({ server: `${host}:${port}`, token: string('auth.token') ?? '', tls: field('transport.tls.enable') !== 'false', user: string('user') ?? '' }) ?? null;
   }
 
   /** The peer and remote Session behind a `subagent_peer` child, if it is one. */
@@ -242,7 +317,9 @@ export function apply(ctx, config) {
 
   function unpair(name) {
     if (!name) throw new PeerError('BAD_INPUT', 'peer is required');
-    return { removed: state.removePeer(name) };
+    const removed = state.removePeer(name);
+    relay.sync();
+    return { removed };
   }
 
   // ---- Full-access prompt ---------------------------------------------------
@@ -294,6 +371,13 @@ export function apply(ctx, config) {
     probe: (args, signal) => probePeer(clientFor(args.peer).peer, signal),
     openWeb: (args, signal) => openWeb(args.peer, typeof args.session === 'string' ? args.session : undefined, signal),
     remoteOf: (args) => remoteOf(args.session),
+    relay: () => ({ ...relay.status(), suggestion: state.relay === undefined ? (relaySuggestion()?.server ?? null) : null }),
+    setRelay: (args) => {
+      if (args.useSuggestion !== true) return setRelay(args);
+      const suggestion = relaySuggestion();
+      if (suggestion === null) throw new PeerError('UNAVAILABLE', 'the FRP tunnel plugin is not running on this machine');
+      return setRelay(suggestion);
+    },
   };
   ctx.inject(['webServer', 'connection'], (web) => {
     web.effect(() => web.webServer.register(webRoute(web.connection, pageApi)), `peer-link: POST ${RPC_PATH}`);
