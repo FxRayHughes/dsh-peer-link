@@ -6,6 +6,7 @@ import net from 'node:net';
 import { join } from 'node:path';
 import { keyIdOf } from './discovery.js';
 import { ensureFrpc } from './frpc-bin.js';
+import { pickStunServer, probeStun } from './stun.js';
 import { hmac } from './protocol.js';
 import { STATE_DIR, writePrivate } from './state.js';
 
@@ -35,6 +36,8 @@ const FALLBACK_MS = 1500;
 const READY_TIMEOUT_MS = 20_000;
 const MAX_RESTARTS = 5;
 const RESTART_DELAY_MS = 5_000;
+// How often the STUN server frpc was given is checked again.
+const STUN_CHECK_MS = 10 * 60_000;
 
 export const proxyName = (secret) => `plk-${keyIdOf(secret)}`;
 const visitorName = (secret) => `plk-v-${keyIdOf(secret)}`;
@@ -47,13 +50,15 @@ function splitServer(server) {
 }
 
 /** frpc TOML for this machine's proxies and one visitor pair per peer. */
-export function buildToml({ relay, admin, ownSecret, localPort, visitors }) {
+export function buildToml({ relay, admin, ownSecret, localPort, visitors, stun }) {
   const [host, port] = splitServer(relay.server);
   const lines = [
     `serverAddr = ${q(host)}`,
     `serverPort = ${port}`,
     'loginFailExit = false',
     `transport.tls.enable = ${relay.tls ? 'true' : 'false'}`,
+    // A STUN server that answered just now; see stun.js.
+    ...(stun ? [`natHoleStunServer = ${q(stun)}`] : []),
     'log.to = "console"',
     'log.level = "info"',
     'log.disablePrintColor = true',
@@ -165,6 +170,22 @@ export class Relay {
     this.waiters = new Set();
     this.queue = Promise.resolve();
     this.closed = false;
+    this.stun = undefined;
+    this.stunTimer = setInterval(() => this.checkStun(), STUN_CHECK_MS);
+    this.stunTimer.unref?.();
+  }
+
+  /**
+   * A STUN server that stops answering makes every punch fall back to the
+   * relay; restart frpc with a fresh pick when that happens.
+   */
+  async checkStun() {
+    if (this.closed || this.child === undefined || this.stun === undefined) return;
+    const [ip, port] = [this.stun.slice(0, this.stun.lastIndexOf(':')), Number(this.stun.slice(this.stun.lastIndexOf(':') + 1))];
+    if (await probeStun(ip, port)) return;
+    this.logger.warn(`peer-link: relay: STUN ${this.stun} stopped answering; restarting frpc with another`);
+    this.serverKey = '';
+    this.sync();
   }
 
   /** Settings that need a fresh frpc when they change. */
@@ -228,13 +249,17 @@ export class Relay {
     if (this.closed || this.serverKey !== serverKey) return;
     await this.stopOrphan();
     this.admin = { port: await freePort(), user: 'peer-link', password: randomBytes(18).toString('base64url') };
+    this.stun = await pickStunServer();
+    if (this.closed || this.serverKey !== serverKey) return;
+    if (this.stun === undefined) this.logger.warn('peer-link: relay: no STUN server answered; P2P will likely fall back to the server relay');
+    else this.logger.info(`peer-link: relay: STUN ${this.stun}`);
     this.writeConfig(server, visitors);
     writePrivate(RUN_FILE, `${JSON.stringify({ admin: this.admin })}\n`);
     this.spawn(binary);
   }
 
   writeConfig(server, visitors) {
-    writePrivate(CONF_FILE, buildToml({ ...server, admin: this.admin, visitors }));
+    writePrivate(CONF_FILE, buildToml({ ...server, admin: this.admin, visitors, stun: this.stun }));
   }
 
   /** An frpc left behind by a crashed DSH still holds the proxy names on frps. */
@@ -431,6 +456,7 @@ export class Relay {
 
   close() {
     this.closed = true;
+    clearInterval(this.stunTimer);
     this.stop();
     this.phase = 'off';
     this.notify();

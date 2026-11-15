@@ -103,7 +103,9 @@ DSH 的「在 Finder 中显示」「用某应用打开」「选择工作区目�
 
 frpc 的来源：先用插件下载过的 `~/.dsh/peer-link/bin/frpc`，再找 PATH（以及 `/opt/homebrew/bin`、`/usr/local/bin`），都没有就从 GitHub 下载 frp 0.71.1（GitHub 不通时依次试 `ghfast.top`、`gh-proxy.com` 镜像），按插件里写死的 SHA-256 校验后再解压，所以镜像换不了包。下载失败时设置页会显示原因，可以手动把 `frpc`（Windows 是 `frpc.exe`）放进 `~/.dsh/peer-link/bin/`。
 
-frps 需要能做 xtcp/stcp（frp 默认就支持，不需要开额外端口）。双方都是对称型 NAT（`HardNAT`）时 P2P 基本打不通，会一直走中转，速度取决于服务器带宽。
+frps 需要能做 xtcp/stcp（frp 默认就支持，不需要开额外端口）。
+
+打洞前 frpc 要问 STUN 服务器本机的公网地址（还会再问它的备用地址来判断 NAT 类型），任何一次超时，这轮打洞就放弃、连接退回服务器中转。frp 默认的 `stun.easyvoip.com` 解析出的 4 个地址里有 2 个已经不响应，大约一半的打洞因此失败。所以插件启动 frpc 前会按 frp 的方式逐个探测 `stun.miwifi.com`、`stun.easyvoip.com`、`stun.nextcloud.com:443` 的每个地址，把第一个两次都响应的**具体 IP:端口**写进 `natHoleStunServer`，并每 10 分钟复查一次，选中的服务器不再响应就换一个、重启 frpc。双方都是对称型 NAT（`HardNAT`）时 P2P 基本打不通，会一直走中转，速度取决于服务器带宽。
 
 ## 配套 skill
 

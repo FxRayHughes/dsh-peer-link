@@ -579,4 +579,55 @@ idle.close();
   await srv.close();
   fs.rmSync(root, { recursive: true, force: true });
 }
+// --- STUN selection: probe like frp does, skip dead addresses ----------------------
+{
+  const dgram = await import('node:dgram');
+  const { parseBinding, probeStun, pickStunServer } = await import('./stun.js');
+  const { buildToml } = await import('./relay.js');
+  // A fake RFC 5780 server pair: primary names the alternate as OTHER-ADDRESS.
+  const reply = (req, rinfo, other) => {
+    const attrs = [];
+    const xor = Buffer.alloc(12);
+    xor.writeUInt16BE(0x0020, 0); xor.writeUInt16BE(8, 2); xor[5] = 1;
+    xor.writeUInt16BE(rinfo.port ^ 0x2112, 6);
+    rinfo.address.split('.').forEach((n, k) => { xor[8 + k] = Number(n) ^ [0x21, 0x12, 0xa4, 0x42][k]; });
+    attrs.push(xor);
+    if (other) {
+      const o = Buffer.alloc(12);
+      o.writeUInt16BE(0x802c, 0); o.writeUInt16BE(8, 2); o[5] = 1; o.writeUInt16BE(other, 6);
+      [127, 0, 0, 1].forEach((n, k) => { o[8 + k] = n; });
+      attrs.push(o);
+    }
+    const body = Buffer.concat(attrs);
+    const head = Buffer.alloc(20);
+    head.writeUInt16BE(0x0101, 0); head.writeUInt16BE(body.length, 2); req.copy(head, 4, 4, 20);
+    return Buffer.concat([head, body]);
+  };
+  const serve = (otherPort) => new Promise((resolve) => {
+    const sock = dgram.createSocket('udp4');
+    sock.on('message', (msg, rinfo) => sock.send(reply(msg, rinfo, otherPort), rinfo.port, rinfo.address));
+    sock.bind(0, '127.0.0.1', () => resolve(sock));
+  });
+  const alt = await serve(undefined);
+  const primary = await serve(alt.address().port);
+  const deadAlt = await serve(1); // names an alternate nobody answers on
+  const silent = dgram.createSocket('udp4');
+  await new Promise((r) => silent.bind(0, '127.0.0.1', r));
+  assert.equal(await probeStun('127.0.0.1', primary.address().port), true, 'both requests answered');
+  assert.equal(await probeStun('127.0.0.1', alt.address().port), true, 'no OTHER-ADDRESS is fine');
+  assert.equal(await probeStun('127.0.0.1', deadAlt.address().port), false, 'dead alternate fails, as in frp');
+  assert.equal(await probeStun('127.0.0.1', silent.address().port), false, 'silent server fails');
+  assert.equal(await pickStunServer([`localhost:${silent.address().port}`, `localhost:${primary.address().port}`]), `127.0.0.1:${primary.address().port}`, 'picks the first live candidate as a literal address');
+  assert.equal(await pickStunServer([`localhost:${silent.address().port}`, 'no-such-host.invalid:3478']), undefined);
+  // RFC 3489 style: MAPPED-ADDRESS + CHANGED-ADDRESS.
+  const legacy = Buffer.alloc(44);
+  legacy.writeUInt16BE(0x0101, 0); legacy.writeUInt16BE(24, 2);
+  legacy.writeUInt16BE(0x0001, 20); legacy.writeUInt16BE(8, 22); legacy[25] = 1; legacy.writeUInt16BE(4242, 26); [1, 2, 3, 4].forEach((n, k) => { legacy[28 + k] = n; });
+  legacy.writeUInt16BE(0x0005, 32); legacy.writeUInt16BE(8, 34); legacy[37] = 1; legacy.writeUInt16BE(3479, 38); [5, 6, 7, 8].forEach((n, k) => { legacy[40 + k] = n; });
+  assert.deepEqual(parseBinding(legacy), { mapped: '1.2.3.4:4242', other: '5.6.7.8:3479' });
+  for (const sock of [alt, primary, deadAlt, silent]) sock.close();
+  const base = { relay: { server: 'f.example:7000', token: '', tls: true }, admin: { port: 1, user: 'u', password: 'p' }, ownSecret: 'A'.repeat(43), localPort: 5, visitors: [] };
+  assert.match(buildToml({ ...base, stun: '111.206.174.2:3478' }), /^natHoleStunServer = "111\.206\.174\.2:3478"$/m);
+  assert.doesNotMatch(buildToml(base), /natHoleStunServer/);
+}
 console.log('peer-link protocol tests passed');
