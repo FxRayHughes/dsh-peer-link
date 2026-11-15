@@ -64,7 +64,7 @@ export function webRoute(connection, api) {
         const body = JSON.parse(await readBody(req));
         const method = String(body?.method ?? '');
         if (!Object.hasOwn(api, method)) throw new PeerError('BAD_INPUT', `unknown method ${method}`);
-        const value = await api[method](body?.args ?? {}, abort.signal);
+        const value = await api[method](body?.args ?? {}, abort.signal, req);
         sendJson(res, 200, { ok: true, value });
       } catch (error) {
         const known = error instanceof PeerError;

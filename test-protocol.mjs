@@ -514,4 +514,69 @@ assert.equal(idle.status().phase, 'off');
 assert.equal(idle.addrOf(peer), undefined);
 idle.close();
 }
+// --- remote-viewer files: listing, folder creation, zip, peer file ops ------------
+{
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const { execFileSync } = await import('node:child_process');
+  const { listDir, makeDir, readFileBytes, statPath, writeZip, attachment } = await import('./remote-files.js');
+  const root = fs.mkdtempSync(join(os.tmpdir(), 'plk-files-'));
+  fs.mkdirSync(join(root, 'sub/deep'), { recursive: true });
+  fs.mkdirSync(join(root, 'node_modules/x'), { recursive: true });
+  fs.writeFileSync(join(root, 'a.txt'), 'hello');
+  fs.writeFileSync(join(root, '图片.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  fs.writeFileSync(join(root, '.hidden'), 'h');
+  fs.writeFileSync(join(root, 'sub/deep/b.bin'), Buffer.alloc(200_000, 7));
+  fs.writeFileSync(join(root, 'node_modules/x/skip.js'), 'skip');
+  const level = await listDir({ path: root });
+  assert.deepEqual(level.entries.map((e) => e.name), ['node_modules', 'sub', '.hidden', 'a.txt', '图片.png']);
+  assert.equal(level.entries.find((e) => e.name === 'a.txt').size, 5);
+  assert.ok(level.entries.find((e) => e.name === '.hidden').hidden);
+  assert.equal(level.crumbs.at(-1).path, root);
+  assert.deepEqual((await listDir({ path: root, dirsOnly: true })).entries.map((e) => e.name), ['node_modules', 'sub']);
+  assert.equal((await listDir({ path: 'sub', base: root })).path, join(root, 'sub'), 'relative to a Session workspace');
+  await assert.rejects(listDir({ path: 'relative' }), /absolute/);
+  await assert.rejects(listDir({ path: join(root, 'a.txt') }), /not a directory/);
+  assert.equal((await makeDir({ path: root, name: '新建' })).path, join(root, '新建'));
+  await assert.rejects(makeDir({ path: root, name: '新建' }), /already exists/);
+  await assert.rejects(makeDir({ path: root, name: '../x' }), /single path segment/);
+  assert.equal((await statPath({ path: join(root, '图片.png') })).mime, 'image/png');
+  assert.equal(Buffer.from((await readFileBytes({ path: join(root, 'a.txt') })).data, 'base64').toString(), 'hello');
+  await assert.rejects(readFileBytes({ path: join(root, 'sub/deep/b.bin'), limit: 1000 }), /download it instead/);
+  assert.match(attachment('项目 1.zip'), /filename="__ 1\.zip"; filename\*=UTF-8''%E9%A1%B9%E7%9B%AE%201\.zip/);
+
+  const zipFile = join(os.tmpdir(), `plk-${process.pid}.zip`);
+  const out = fs.createWriteStream(zipFile);
+  const result = await writeZip(root, out);
+  await new Promise((r) => out.end(r));
+  assert.equal(result.files, 3, 'hidden files and node_modules are left out');
+  const listing = execFileSync('unzip', ['-l', zipFile], { encoding: 'utf8' });
+  assert.match(listing, /a\.txt/); assert.match(listing, /sub\/deep\/b\.bin/);
+  // macOS's unzip ignores the UTF-8 flag; Python's zipfile (like Explorer and Archive Utility) honours it.
+  const names = execFileSync('/usr/bin/python3', ['-c', 'import sys,zipfile;print("\\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))', zipFile], { encoding: 'utf8' });
+  assert.match(names, /^图片\.png$/m);
+  assert.doesNotMatch(listing, /skip\.js|\.hidden/);
+  execFileSync('unzip', ['-tq', zipFile]);
+  assert.equal(execFileSync('unzip', ['-p', zipFile, 'a.txt'], { encoding: 'utf8' }), 'hello');
+  assert.equal(execFileSync('unzip', ['-p', zipFile, 'sub/deep/b.bin']).length, 200_000);
+  fs.rmSync(zipFile);
+
+  // Signed peer ops, fenced by allowedRoots.
+  const box = new PeerState();
+  box.data = { secret: newSecret(), peers: [] };
+  let allowed = '';
+  const fileOps = new SessionOps({ logger: { info() {}, warn() {} }, get: () => undefined }, () => ({ displayName: 'files', allowedRoots: allowed }), box);
+  const srv = await startServer({ ctx: { logger: { info() {}, warn() {} } }, ops: fileOps, state: box, host: '127.0.0.1', port: 0, allowCidrs: '127.0.0.0/8' });
+  const asker = new PeerState();
+  const farPeer = asker.upsertPeer({ name: 'files', secret: box.secret, hints: [`127.0.0.1:${srv.port}`], platform: 'darwin' });
+  const fc = new PeerClient(asker, farPeer, { info() {}, warn() {} });
+  assert.equal((await fc.call('filesList', { path: root })).entries.length, 6);
+  assert.equal(Buffer.from((await fc.call('filesRead', { path: join(root, 'a.txt') })).data, 'base64').toString(), 'hello');
+  allowed = join(root, 'sub');
+  await assert.rejects(fc.call('filesRead', { path: join(root, 'a.txt') }), /outside the allowed roots/);
+  assert.equal((await fc.call('filesStat', { path: join(root, 'sub/deep/b.bin') })).size, 200_000);
+  await assert.rejects(fc.call('filesRead', { path: 'a.txt' }), /absolute/, 'relative path without a Session base');
+  await srv.close();
+  fs.rmSync(root, { recursive: true, force: true });
+}
 console.log('peer-link protocol tests passed');

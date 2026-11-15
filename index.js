@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { createReadStream, existsSync, readFileSync } from 'node:fs';
+import { homedir, hostname, platform } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { Discovery, DISCOVERY_PORT } from './discovery.js';
@@ -11,6 +11,7 @@ import { followRun, PeerSubagentProvider } from './provider.js';
 import { Relay } from './relay.js';
 import { SessionOps, startServer } from './server.js';
 import { cleanRelay, decodeCode, defaultDisplayName, PAIRING_FILE, PeerState, publicPeer } from './state.js';
+import { attachment, FILE_PATH, listDir, makeDir, mimeOf, realDir, statPath, VIEWER_HEADER, writeZip, ZIP_PATH } from './remote-files.js';
 import { RPC_PATH, webRoute } from './web.js';
 import { WebShare } from './web-share.js';
 
@@ -348,6 +349,101 @@ export function apply(ctx, config) {
     return accessState();
   }
 
+  // ---- Remote viewers and peer files ---------------------------------------
+  // A browser reaching this DSH through peer-link's web share or the FRP
+  // tunnel is not at this machine; see remote-files.js.
+  const viewerOf = (req) => {
+    const via = String(req?.headers?.[VIEWER_HEADER] ?? '');
+    return via ? { remote: true, via, host: hostname(), platform: platform() } : { remote: false, host: hostname(), platform: platform() };
+  };
+
+  /** The peer that runs a `subagent_peer` child's remote Session, for its file links. */
+  function peerFiles(args) {
+    const link = remoteOf(args.session);
+    if (link === null) throw new PeerError('NOT_FOUND', 'not a peer subagent session');
+    return { client: clientFor(link.peer), remote: link.session, peer: link.peer };
+  }
+
+  async function peerCall(op, args, signal) {
+    const { client, remote, peer } = peerFiles(args);
+    let value;
+    try {
+      value = await client.call(op, { path: args.path, sessionId: remote, ...(args.dirsOnly ? { dirsOnly: true } : {}) }, { signal, timeoutMs: 60_000 });
+    } catch (error) {
+      if (error instanceof PeerError && /unknown op/.test(error.message)) {
+        throw new PeerError('OUTDATED', `${peer} 上的 dsh-peer-link 版本过旧，不支持读取文件；请把它升级到 0.6.0 或更高版本（${peer} runs an older dsh-peer-link without file access）`, 400);
+      }
+      throw error;
+    }
+    return { ...value, peer };
+  }
+
+  /** GET routes: one file, a folder as zip, or a peer subagent's file, as downloads. */
+  function fileRoutes(connection) {
+    const guard = (req, res) => {
+      const rejection = connection.requestRejection(req);
+      if (rejection === undefined && req.method === 'GET') return new URL(req.url ?? '/', 'http://dsh').searchParams;
+      res.statusCode = rejection ?? 405;
+      res.end();
+      return undefined;
+    };
+    const fail = (res, error) => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      const status = error instanceof PeerError ? (error.status >= 400 ? error.status : 400) : 500;
+      res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(error instanceof Error ? error.message : String(error));
+    };
+    return [
+      {
+        kind: 'exact',
+        path: FILE_PATH,
+        handler: async (req, res) => {
+          const query = guard(req, res);
+          if (query === undefined) return;
+          try {
+            const inline = query.get('inline') === '1';
+            if (query.get('peer-session')) {
+              const value = await peerCall('filesRead', { session: query.get('peer-session'), path: query.get('path') });
+              const data = Buffer.from(value.data, 'base64');
+              res.writeHead(200, { 'content-type': value.mime ?? 'application/octet-stream', 'content-length': data.length, 'content-disposition': attachment(value.name, inline), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+              res.end(data);
+              return;
+            }
+            const meta = await statPath({ path: query.get('path') });
+            if (meta.dir) throw new PeerError('BAD_INPUT', `${meta.path} is a folder; download it as zip`);
+            res.writeHead(200, { 'content-type': mimeOf(meta.path), 'content-length': meta.size, 'content-disposition': attachment(meta.name, inline), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+            createReadStream(meta.path).on('error', () => res.destroy()).pipe(res);
+          } catch (error) {
+            fail(res, error);
+          }
+        },
+      },
+      {
+        kind: 'exact',
+        path: ZIP_PATH,
+        handler: async (req, res) => {
+          const query = guard(req, res);
+          if (query === undefined) return;
+          const abort = new AbortController();
+          res.on('close', () => abort.abort());
+          try {
+            const dir = await realDir(query.get('path'));
+            const name = `${dir.split(/[\\/]/).filter(Boolean).pop() || 'folder'}.zip`;
+            res.writeHead(200, { 'content-type': 'application/zip', 'content-disposition': attachment(name), 'cache-control': 'no-store' });
+            await writeZip(dir, res, { hidden: query.get('hidden') === '1', signal: abort.signal });
+            res.end();
+          } catch (error) {
+            if (!abort.signal.aborted) ctx.logger.warn(`peer-link: zip: ${error.message}`);
+            fail(res, error);
+          }
+        },
+      },
+    ];
+  }
+
   // ---- Settings page --------------------------------------------------------
   // The page only reads this machine's own pairing code; it never pairs
   // without the user pasting the other side's code.
@@ -371,6 +467,11 @@ export function apply(ctx, config) {
     probe: (args, signal) => probePeer(clientFor(args.peer).peer, signal),
     openWeb: (args, signal) => openWeb(args.peer, typeof args.session === 'string' ? args.session : undefined, signal),
     remoteOf: (args) => remoteOf(args.session),
+    viewer: (_args, _signal, req) => viewerOf(req),
+    listDir: (args) => listDir({ path: args.path || undefined, dirsOnly: args.dirsOnly === true, details: args.details === true }),
+    makeDir: (args) => makeDir(args),
+    peerList: (args, signal) => peerCall('filesList', args, signal),
+    peerStat: (args, signal) => peerCall('filesStat', args, signal),
     relay: () => ({ ...relay.status(), suggestion: state.relay === undefined ? (relaySuggestion()?.server ?? null) : null }),
     setRelay: (args) => {
       if (args.useSuggestion !== true) return setRelay(args);
@@ -381,6 +482,7 @@ export function apply(ctx, config) {
   };
   ctx.inject(['webServer', 'connection'], (web) => {
     web.effect(() => web.webServer.register(webRoute(web.connection, pageApi)), `peer-link: POST ${RPC_PATH}`);
+    for (const route of fileRoutes(web.connection)) web.effect(() => web.webServer.register(route), `peer-link: GET ${route.path}`);
   });
 
   // ---- Model-facing tool --------------------------------------------------

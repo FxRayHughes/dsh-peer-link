@@ -114,6 +114,35 @@ window.__ModuleLoader__.load({
       routeLan: '局域网',
       routeP2p: 'P2P',
       routeRelay: '中转',
+      fbTitle: '{host} 上的文件',
+      fbPeerTitle: '{peer} 上的文件',
+      fbPick: '选择工作区目录（{host}）',
+      fbHome: '主目录',
+      fbUp: '上一级',
+      fbHidden: '显示隐藏项',
+      fbLoading: '加载中…',
+      fbEmpty: '空文件夹',
+      fbTruncated: '项目太多，只显示前 1000 个。',
+      fbDownload: '下载',
+      fbZip: '下载整个文件夹（zip）',
+      fbOpen: '在新标签页打开',
+      fbChoose: '选择此文件夹',
+      fbNewFolder: '新建文件夹',
+      fbFolderName: '文件夹名称',
+      fbCreate: '创建',
+      fbCancel: '取消',
+      fbClose: '关闭',
+      fbPathPlaceholder: '输入路径后回车',
+      fbRemoteNote: '你在另一台设备上查看 {host}：这里浏览和下载的是 {host} 上的文件。',
+      menuDownloadHere: '下载到这台设备',
+      menuZipHere: '下载文件夹（zip）到这台设备',
+      menuBrowseHere: '在网页里浏览这个文件夹',
+      menuPeerPreview: '从 {peer} 预览',
+      menuPeerDownload: '从 {peer} 下载到本机',
+      menuPeerBrowse: '浏览 {peer} 上的这个文件夹',
+      peerFiles: '{peer} 上的文件',
+      downloadStarted: '开始下载 {name}',
+      remoteBadge: '远程查看 {host}',
     };
     const en = {
       summary: 'Link DSH instances on the LAN: delegate subagents and continue remote sessions',
@@ -223,6 +252,35 @@ window.__ModuleLoader__.load({
       routeLan: 'LAN',
       routeP2p: 'P2P',
       routeRelay: 'relayed',
+      fbTitle: 'Files on {host}',
+      fbPeerTitle: 'Files on {peer}',
+      fbPick: 'Select workspace directory ({host})',
+      fbHome: 'Home',
+      fbUp: 'Up',
+      fbHidden: 'Show hidden',
+      fbLoading: 'Loading…',
+      fbEmpty: 'Empty folder',
+      fbTruncated: 'Too many items; only the first 1000 are shown.',
+      fbDownload: 'Download',
+      fbZip: 'Download whole folder (zip)',
+      fbOpen: 'Open in new tab',
+      fbChoose: 'Select this folder',
+      fbNewFolder: 'New folder',
+      fbFolderName: 'Folder name',
+      fbCreate: 'Create',
+      fbCancel: 'Cancel',
+      fbClose: 'Close',
+      fbPathPlaceholder: 'Type a path and press Enter',
+      fbRemoteNote: 'You are viewing {host} from another device: browsing and downloads here are files on {host}.',
+      menuDownloadHere: 'Download to this device',
+      menuZipHere: 'Download folder (zip) to this device',
+      menuBrowseHere: 'Browse this folder in the page',
+      menuPeerPreview: 'Preview from {peer}',
+      menuPeerDownload: 'Download from {peer}',
+      menuPeerBrowse: 'Browse this folder on {peer}',
+      peerFiles: 'Files on {peer}',
+      downloadStarted: 'Downloading {name}',
+      remoteBadge: 'Viewing {host} remotely',
     };
 
     const NS = 'peer-link';
@@ -1314,6 +1372,604 @@ window.__ModuleLoader__.load({
       );
     }
 
+
+    // ---- Files for a viewer on another device, and a peer subagent's files ----
+
+    const FB_CSS = `
+.pl-fb{box-sizing:border-box;width:min(760px,100%);height:min(560px,calc(100vh - 48px));display:flex;flex-direction:column;border-radius:12px;border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 12px 40px rgba(0,0,0,.24);overflow:hidden}
+.pl-fb-head{display:flex;flex-direction:column;gap:8px;padding:14px 16px 10px;border-bottom:.5px solid var(--dsw-alias-border-l1)}
+.pl-fb-title{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600;line-height:22px}
+.pl-fb-title span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-fb-note{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary)}
+.pl-fb-crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:2px;font-size:12px;line-height:18px}
+.pl-fb-crumb{border:none;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;padding:1px 4px;border-radius:4px;cursor:pointer;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-fb-crumb:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pl-fb-crumb.last{color:var(--dsw-alias-label-primary);font-weight:600}
+.pl-fb-tools{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.pl-fb-tools .pl-input{flex:1;min-width:160px;font-size:12px;padding:4px 8px}
+.pl-fb-body{flex:1;min-height:0;display:flex}
+.pl-fb-list{flex:1;min-width:0;overflow:auto;padding:4px 6px}
+.pl-fb-row{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:5px 8px;border:none;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:20px;text-align:left;cursor:pointer}
+.pl-fb-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pl-fb-row.sel{background:var(--dsw-alias-interactive-bg-selected,var(--dsw-alias-bg-layer-2))}
+.pl-fb-row.hidden{opacity:.6}
+.pl-fb-ico{flex:none;width:16px;text-align:center;color:var(--dsw-alias-label-secondary)}
+.pl-fb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-fb-size{flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
+.pl-fb-dl{flex:none;opacity:0;border:none;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;padding:0 4px;border-radius:4px;cursor:pointer}
+.pl-fb-row:hover .pl-fb-dl,.pl-fb-row.sel .pl-fb-dl{opacity:1}
+.pl-fb-dl:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2)}
+.pl-fb-preview{flex:0 0 42%;min-width:0;border-left:.5px solid var(--dsw-alias-border-l1);display:flex;flex-direction:column;gap:8px;padding:10px;overflow:auto}
+.pl-fb-preview img{max-width:100%;max-height:340px;object-fit:contain;border-radius:6px;background:var(--dsw-alias-bg-layer-1)}
+.pl-fb-preview pre{margin:0;font:11px/16px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.pl-fb-foot{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:.5px solid var(--dsw-alias-border-l1)}
+.pl-fb-foot .pl-note{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-fb-msg{padding:16px;font-size:13px;color:var(--dsw-alias-label-secondary)}
+.pl-fb-msg.err{color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
+@media (max-width:640px){.pl-fb-preview{display:none}.pl-fb-dl{opacity:1}}
+`;
+
+    const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i;
+    const TEXT_EXT = /\.(txt|md|markdown|json|jsonl|ya?ml|toml|ini|cfg|conf|log|csv|tsv|xml|html?|css|scss|less|[cm]?[jt]sx?|py|rb|go|rs|java|kt|kts|c|h|cc|cpp|hpp|cs|swift|m|mm|php|sh|bash|zsh|ps1|bat|cmd|sql|gradle|properties|env|gitignore|dockerfile|vue|svelte|lua|r|dart|scala|ex|exs|pl)$/i;
+
+    function humanSize(bytes) {
+      if (bytes === undefined || bytes === null) return '';
+      if (bytes < 1024) return `${bytes} B`;
+      const units = ['KB', 'MB', 'GB', 'TB'];
+      let value = bytes / 1024;
+      let i = 0;
+      while (value >= 1024 && i < units.length - 1) {
+        value /= 1024;
+        i += 1;
+      }
+      return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
+    }
+
+    function query(params) {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== null && value !== '') search.set(key, String(value));
+      return search.toString();
+    }
+
+    /** Hand a same-origin URL to the browser as a download (the Android app saves it too). */
+    function startDownload(url, name) {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      if (name) anchor.download = name;
+      anchor.rel = 'noopener';
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+    }
+
+    const baseName = (path) => String(path).split(/[\\/]/).filter(Boolean).pop() || String(path);
+    const isAbs = (path) => /^([A-Za-z]:[\\/]|[\\/])/.test(String(path));
+
+    /**
+     * Where a file browser reads from: this DSH's machine (as seen by a remote
+     * viewer), or the peer that runs a `subagent_peer` child.
+     */
+    function localSource(viewer) {
+      return {
+        kind: 'local',
+        host: viewer.host,
+        list: (path, opts) => rpc('listDir', { path, dirsOnly: opts?.dirsOnly === true, details: true }),
+        mkdir: (path, name) => rpc('makeDir', { path, name }),
+        fileUrl: (path, inline) => `peer-link/file?${query({ path, inline: inline ? 1 : undefined })}`,
+        zipUrl: (path) => `peer-link/zip?${query({ path })}`,
+      };
+    }
+
+    function peerSource(remote, childSession) {
+      return {
+        kind: 'peer',
+        host: remote.peer,
+        list: (path, opts) => rpc('peerList', { session: childSession, path, dirsOnly: opts?.dirsOnly === true }),
+        mkdir: null,
+        fileUrl: (path, inline) => `peer-link/file?${query({ 'peer-session': childSession, path, inline: inline ? 1 : undefined })}`,
+        zipUrl: null,
+      };
+    }
+
+    function FilePreview({ t, source, entry }) {
+      const [text, setText] = useState(null);
+      const image = IMAGE_EXT.test(entry.name);
+      const textual = !image && TEXT_EXT.test(entry.name) && (entry.size ?? 0) <= 512 * 1024;
+      useEffect(() => {
+        setText(null);
+        if (!textual) return undefined;
+        const controller = new AbortController();
+        fetch(source.fileUrl(entry.path, true), { credentials: 'same-origin', signal: controller.signal })
+          .then((response) => (response.ok ? response.text() : Promise.reject(new Error(`HTTP ${response.status}`))))
+          .then((body) => setText(body.length > 60000 ? `${body.slice(0, 60000)}\n…` : body))
+          .catch((error) => controller.signal.aborted || setText(`(${error.message})`));
+        return () => controller.abort();
+      }, [entry.path]);
+      return h(
+        'div',
+        { className: 'pl-fb-preview' },
+        h('div', { className: 'pl-label', style: { overflowWrap: 'anywhere' } }, entry.name),
+        h('div', { className: 'pl-hint' }, humanSize(entry.size)),
+        image ? h('img', { src: source.fileUrl(entry.path, true), alt: entry.name }) : null,
+        textual ? h('pre', null, text ?? t('fbLoading')) : null,
+        h(
+          'div',
+          { className: 'pl-inline' },
+          h('button', { type: 'button', className: 'pl-btn primary', onClick: () => startDownload(source.fileUrl(entry.path, false), entry.name) }, t('fbDownload')),
+          h('button', { type: 'button', className: 'pl-btn', onClick: () => window.open(source.fileUrl(entry.path, true), '_blank', 'noopener') }, t('fbOpen')),
+        ),
+      );
+    }
+
+    /**
+     * In-page file browser over a source. With `pick`, it lists folders only
+     * and confirms one (the workspace directory picker); otherwise it previews
+     * and downloads files and zips folders.
+     */
+    function FileBrowser({ t, source, start, pick, busy, onPicked, onClose, remoteNote }) {
+      const [path, setPath] = useState(start || '');
+      const [listing, setListing] = useState(null);
+      const [error, setError] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [hidden, setHidden] = useState(false);
+      const [selected, setSelected] = useState(null);
+      const [typed, setTyped] = useState('');
+      const [creating, setCreating] = useState(null);
+      const [note, setNote] = useState(null);
+      const load = useCallback(
+        (target) => {
+          setLoading(true);
+          setError(null);
+          setSelected(null);
+          source
+            .list(target || undefined, { dirsOnly: pick })
+            .then((value) => {
+              setListing(value);
+              setPath(value.path);
+              setTyped(value.path);
+            })
+            .catch((cause) => setError(cause.message))
+            .finally(() => setLoading(false));
+        },
+        [source, pick],
+      );
+      useEffect(() => load(start || ''), []);
+      useEffect(() => {
+        const onKey = (event) => {
+          if (event.key === 'Escape' && !creating) onClose();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [creating, onClose]);
+      const entries = (listing?.entries ?? []).filter((entry) => hidden || !entry.hidden);
+      const title = pick
+        ? fill(t('fbPick'), { host: source.host })
+        : source.kind === 'peer'
+          ? fill(t('fbPeerTitle'), { peer: source.host })
+          : fill(t('fbTitle'), { host: source.host });
+      const createFolder = () => {
+        const name = String(creating ?? '').trim();
+        if (!name) return;
+        source
+          .mkdir(path, name)
+          .then((value) => {
+            setCreating(null);
+            load(value.path);
+          })
+          .catch((cause) => setNote({ ok: false, text: cause.message }));
+      };
+      const rows = entries.map((entry) =>
+        h(
+          'button',
+          {
+            key: entry.path,
+            type: 'button',
+            className: `pl-fb-row${entry.hidden ? ' hidden' : ''}${selected?.path === entry.path ? ' sel' : ''}`,
+            title: entry.path,
+            onClick: () => (entry.dir ? load(entry.path) : setSelected(entry)),
+          },
+          h('span', { className: 'pl-fb-ico', 'aria-hidden': true }, entry.dir ? '📁' : IMAGE_EXT.test(entry.name) ? '🖼' : '📄'),
+          h('span', { className: 'pl-fb-name' }, entry.name),
+          entry.dir ? null : h('span', { className: 'pl-fb-size' }, humanSize(entry.size)),
+          !entry.dir && !pick
+            ? h(
+                'span',
+                {
+                  role: 'button',
+                  tabIndex: 0,
+                  className: 'pl-fb-dl',
+                  title: t('fbDownload'),
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    startDownload(source.fileUrl(entry.path, false), entry.name);
+                  },
+                },
+                '⤓',
+              )
+            : null,
+        ),
+      );
+      return h(
+        'div',
+        {
+          className: 'pl-scrim',
+          role: 'presentation',
+          onMouseDown: (event) => {
+            if (event.target === event.currentTarget) onClose();
+          },
+        },
+        h('style', null, CSS + FB_CSS),
+        h(
+          'div',
+          { className: 'pl-fb', role: 'dialog', 'aria-modal': true, 'aria-label': title },
+          h(
+            'div',
+            { className: 'pl-fb-head' },
+            h('div', { className: 'pl-fb-title' }, h('span', null, title), h('button', { type: 'button', className: 'pl-btn', onClick: onClose }, t('fbClose'))),
+            remoteNote ? h('div', { className: 'pl-fb-note' }, remoteNote) : null,
+            h(
+              'div',
+              { className: 'pl-fb-crumbs' },
+              (listing?.crumbs ?? []).map((crumb, index, all) =>
+                h(
+                  React.Fragment,
+                  { key: crumb.path },
+                  index > 0 ? h('span', { 'aria-hidden': true }, '›') : null,
+                  h('button', { type: 'button', className: `pl-fb-crumb${index === all.length - 1 ? ' last' : ''}`, onClick: () => load(crumb.path) }, crumb.name),
+                ),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'pl-fb-tools' },
+              h('button', { type: 'button', className: 'pl-btn', disabled: !listing?.parent, onClick: () => load(listing.parent) }, t('fbUp')),
+              h('button', { type: 'button', className: 'pl-btn', onClick: () => load(listing?.home ?? '') }, t('fbHome')),
+              (listing?.roots ?? [])
+                .filter((root) => root.path !== listing?.home)
+                .map((root) => h('button', { key: root.path, type: 'button', className: 'pl-btn', onClick: () => load(root.path) }, root.name)),
+              h('input', {
+                className: 'pl-input',
+                value: typed,
+                placeholder: t('fbPathPlaceholder'),
+                spellCheck: false,
+                onChange: (event) => setTyped(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') load(typed.trim());
+                },
+              }),
+              h(
+                'label',
+                { className: 'pl-inline pl-hint' },
+                h('input', { type: 'checkbox', checked: hidden, onChange: (event) => setHidden(event.target.checked) }),
+                t('fbHidden'),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'pl-fb-body' },
+            h(
+              'div',
+              { className: 'pl-fb-list' },
+              loading
+                ? h('div', { className: 'pl-fb-msg' }, t('fbLoading'))
+                : error
+                  ? h('div', { className: 'pl-fb-msg err' }, error)
+                  : rows.length === 0
+                    ? h('div', { className: 'pl-fb-msg' }, t('fbEmpty'))
+                    : rows,
+              listing?.truncated ? h('div', { className: 'pl-fb-msg' }, t('fbTruncated')) : null,
+            ),
+            !pick && selected ? h(FilePreview, { t, source, entry: selected }) : null,
+          ),
+          h(
+            'div',
+            { className: 'pl-fb-foot' },
+            creating !== null
+              ? h(
+                  React.Fragment,
+                  null,
+                  h('input', {
+                    className: 'pl-input',
+                    autoFocus: true,
+                    value: creating,
+                    placeholder: t('fbFolderName'),
+                    onChange: (event) => setCreating(event.target.value),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter') createFolder();
+                      if (event.key === 'Escape') setCreating(null);
+                    },
+                  }),
+                  h('button', { type: 'button', className: 'pl-btn primary', onClick: createFolder }, t('fbCreate')),
+                  h('button', { type: 'button', className: 'pl-btn', onClick: () => setCreating(null) }, t('fbCancel')),
+                )
+              : h(
+                  React.Fragment,
+                  null,
+                  h('span', { className: `pl-note${note ? (note.ok ? ' ok' : ' err') : ''}`, title: note?.text ?? path }, note?.text ?? path),
+                  pick && source.mkdir ? h('button', { type: 'button', className: 'pl-btn', disabled: !listing, onClick: () => setCreating('') }, t('fbNewFolder')) : null,
+                  !pick && source.zipUrl && listing
+                    ? h('button', { type: 'button', className: 'pl-btn', onClick: () => startDownload(source.zipUrl(path), `${baseName(path)}.zip`) }, t('fbZip'))
+                    : null,
+                  pick
+                    ? h('button', { type: 'button', className: 'pl-btn primary', disabled: !listing || busy, onClick: () => onPicked(path) }, t('fbChoose'))
+                    : null,
+                ),
+          ),
+        ),
+      );
+    }
+
+    /** The workspace directory flow for a viewer on another device: no OS dialog on a screen nobody sees. */
+    function makeRemoteDirectoryFlow(viewer) {
+      const source = localSource(viewer);
+      return function RemoteDirectoryFlow({ t, open, busy, onPicked, onCancel }) {
+        if (!open) return null;
+        return h(FileBrowser, { t, source, pick: true, busy, onPicked, onClose: onCancel, remoteNote: fill(t('fbRemoteNote'), { host: viewer.host }) });
+      };
+    }
+
+    /** One browser dialog at a time, opened from menus outside React. */
+    const browserBus = { open: null };
+
+    function BrowserHost({ t }) {
+      const [request, setRequest] = useState(null);
+      useEffect(() => {
+        browserBus.open = setRequest;
+        return () => {
+          if (browserBus.open === setRequest) browserBus.open = null;
+        };
+      }, []);
+      if (request === null) return null;
+      return h(FileBrowser, {
+        t,
+        source: request.source,
+        start: request.start,
+        remoteNote: request.note,
+        onClose: () => setRequest(null),
+      });
+    }
+
+    function DownloadAction({ t, absolutePath }) {
+      return h(
+        React.Fragment,
+        null,
+        h('style', null, NAV_CSS),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'pl-act',
+            title: t('menuDownloadHere'),
+            'aria-label': t('menuDownloadHere'),
+            onClick: () => startDownload(`peer-link/file?${query({ path: absolutePath })}`, baseName(absolutePath)),
+          },
+          '⤓',
+        ),
+      );
+    }
+
+    /** Header button of a `subagent_peer` child: browse the peer's files from its working directory. */
+    function PeerFilesAction({ t, sessionId }) {
+      const [remote, setRemote] = useState(null);
+      useEffect(() => {
+        let live = true;
+        if (typeof sessionId === 'string') remoteOfCached(sessionId).then((value) => live && setRemote(value));
+        return () => {
+          live = false;
+        };
+      }, [sessionId]);
+      if (remote === null) return null;
+      const label = fill(t('peerFiles'), { peer: remote.peer });
+      return h(
+        React.Fragment,
+        null,
+        h('style', null, NAV_CSS),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'pl-act',
+            title: label,
+            'aria-label': label,
+            onClick: () => browserBus.open?.({ source: peerSource(remote, sessionId), start: '' }),
+          },
+          '📁 ',
+          label,
+        ),
+      );
+    }
+
+    const remoteCache = new Map();
+    function remoteOfCached(sessionId) {
+      if (!remoteCache.has(sessionId)) {
+        remoteCache.set(
+          sessionId,
+          rpc('remoteOf', { session: sessionId }).catch(() => null).then((value) => {
+            // A child linked later is looked up again next time.
+            if (value === null) setTimeout(() => remoteCache.delete(sessionId), 15000);
+            return value;
+          }),
+        );
+      }
+      return remoteCache.get(sessionId);
+    }
+
+    /**
+     * Context-menu rows: downloads and in-page browsing for a remote viewer,
+     * peer preview and downloads inside a `subagent_peer` child.
+     */
+    function registerFileMenus(ctx, t, viewer) {
+      const menus = ctx.get('contextMenus');
+      if (!menus) return () => {};
+      const cwdOf = (sessionId) => {
+        try {
+          return ctx.get('sessions')?.list?.getSnapshot()?.byId?.[sessionId]?.cwd;
+        } catch {
+          return undefined;
+        }
+      };
+      const sep = viewer.platform === 'win32' ? '\\' : '/';
+      const resolveLocal = (sessionId, path) => {
+        if (isAbs(path)) return path;
+        const cwd = cwdOf(sessionId);
+        return cwd ? `${String(cwd).replace(/[\\/]+$/, '')}${sep}${String(path).replace(/^\.?[\\/]/, '')}` : undefined;
+      };
+      const notify = (text) => {
+        try {
+          menus.notify(text, true);
+        } catch {
+          // Feedback only.
+        }
+      };
+      const local = localSource(viewer);
+      const note = fill(t('fbRemoteNote'), { host: viewer.host });
+      const disposers = [];
+      const add = (contribution) => {
+        try {
+          disposers.push(menus.register(contribution));
+        } catch (error) {
+          console.error('peer-link: context menu', contribution.id, error);
+        }
+      };
+      const peerRows = async (sessionId, path, dir, signal) => {
+        const remote = await remoteOfCached(sessionId);
+        signal?.throwIfAborted?.();
+        if (!remote) return [];
+        const source = peerSource(remote, sessionId);
+        if (dir) {
+          return [{ id: 'peer-browse', separatorBefore: true, label: fill(t('menuPeerBrowse'), { peer: remote.peer }), run: () => browserBus.open?.({ source, start: path }) }];
+        }
+        return [
+          { id: 'peer-preview', separatorBefore: true, label: fill(t('menuPeerPreview'), { peer: remote.peer }), run: () => window.open(source.fileUrl(path, true), '_blank', 'noopener') },
+          {
+            id: 'peer-download',
+            label: fill(t('menuPeerDownload'), { peer: remote.peer }),
+            run: () => {
+              startDownload(source.fileUrl(path, false), baseName(path));
+              notify(fill(t('downloadStarted'), { name: baseName(path) }));
+            },
+          },
+        ];
+      };
+      add({
+        id: 'peer-link.file',
+        target: 'file',
+        order: 150,
+        resolve: async ({ sessionId, path }, signal) => {
+          const rows = [];
+          if (viewer.remote) {
+            const abs = resolveLocal(sessionId, path);
+            if (abs) {
+              rows.push({
+                id: 'download-here',
+                separatorBefore: true,
+                label: t('menuDownloadHere'),
+                run: () => {
+                  startDownload(local.fileUrl(abs, false), baseName(abs));
+                  notify(fill(t('downloadStarted'), { name: baseName(abs) }));
+                },
+              });
+            }
+          }
+          return rows.concat(await peerRows(sessionId, path, false, signal));
+        },
+      });
+      add({
+        id: 'peer-link.directory',
+        target: 'directory',
+        order: 150,
+        resolve: async ({ sessionId, path }, signal) => {
+          const rows = [];
+          if (viewer.remote) {
+            const abs = resolveLocal(sessionId, path || '.') ?? cwdOf(sessionId);
+            if (abs) {
+              rows.push(
+                { id: 'browse-here', separatorBefore: true, label: t('menuBrowseHere'), run: () => browserBus.open?.({ source: local, start: abs, note }) },
+                { id: 'zip-here', label: t('menuZipHere'), run: () => startDownload(local.zipUrl(abs), `${baseName(abs)}.zip`) },
+              );
+            }
+          }
+          return rows.concat(await peerRows(sessionId, path, true, signal));
+        },
+      });
+      if (viewer.remote) {
+        add({
+          id: 'peer-link.workspace',
+          target: 'workspace',
+          order: 250,
+          resolve: ({ path }) =>
+            path
+              ? [
+                  { id: 'browse-here', separatorBefore: true, label: t('menuBrowseHere'), run: () => browserBus.open?.({ source: local, start: path, note }) },
+                  { id: 'zip-here', label: t('menuZipHere'), run: () => startDownload(local.zipUrl(path), `${baseName(path)}.zip`) },
+                ]
+              : [],
+        });
+        add({
+          id: 'peer-link.image',
+          target: 'image',
+          order: 250,
+          resolve: ({ sessionId, path }) => {
+            const abs = sessionId && path ? resolveLocal(sessionId, path) : undefined;
+            return abs ? [{ id: 'download-here', separatorBefore: true, label: t('menuDownloadHere'), run: () => startDownload(local.fileUrl(abs, false), baseName(abs)) }] : [];
+          },
+        });
+      }
+      return () => {
+        for (const dispose of disposers) dispose();
+      };
+    }
+
+    /** Remote-viewer and peer-file features; `viewer` comes from the Host's view of this request. */
+    function applyFiles(ctx) {
+      ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'peer-link.files', locale: NS }, BrowserHost));
+      ctx.slots.inject('conversation.session.header.actions', () =>
+        ctx.slots.register({ name: 'conversation.session.header.actions', id: 'peer-link.peer-files', order: 51, locale: NS }, PeerFilesAction),
+      );
+      let disposed = false;
+      const cleanups = [];
+      rpc('viewer')
+        .catch(() => ({ remote: false, host: '', platform: '' }))
+        .then((viewer) => {
+          if (disposed) return;
+          const t = (key) => ({ ...en, ...(String(navigator.language || '').startsWith('zh') ? zh : {}) })[key] ?? key;
+          const tl = (key) => {
+            try {
+              return ctx.get('locale')?.bind(NS)(key) ?? t(key);
+            } catch {
+              return t(key);
+            }
+          };
+          const menusReady = () => {
+            if (disposed) return;
+            if (!ctx.get('contextMenus')) {
+              cleanups.push(setTimeout(menusReady, 500));
+              return;
+            }
+            cleanups.push(registerFileMenus(ctx, tl, viewer));
+          };
+          menusReady();
+          if (!viewer.remote) return;
+          const Flow = makeRemoteDirectoryFlow(viewer);
+          for (const name of ['conversation.hero.workspace.directoryFlow', 'sidebar.workspaces.directoryFlow']) {
+            // A single slot: the lowest priority renders, so this shadows the
+            // shipped native picker (priority 0) only for this remote viewer.
+            cleanups.push(ctx.slots.inject(name, () => ctx.slots.register({ name, priority: -10, locale: NS }, Flow)));
+          }
+          for (const name of ['sidebar.right.tab.document.actions', 'sidebar.right.tab.document.unpreviewable']) {
+            cleanups.push(ctx.slots.inject(name, () => ctx.slots.register({ name, id: 'peer-link.download', order: 5, locale: NS }, DownloadAction)));
+          }
+        });
+      return () => {
+        disposed = true;
+        for (const cleanup of cleanups) {
+          if (typeof cleanup === 'function') cleanup();
+          else clearTimeout(cleanup);
+        }
+      };
+    }
+
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
@@ -1326,6 +1982,7 @@ window.__ModuleLoader__.load({
           ctx.slots.register({ name: 'conversation.session.header.actions', id: 'peer-link.remote', order: 50, locale: NS }, RemoteSessionAction),
         );
         ctx.effect(() => openSharedSession(ctx), 'peer-link: open shared session');
+        ctx.effect(() => applyFiles(ctx), 'peer-link: remote viewer files');
         ctx.slots.inject('plugins.row.config', () =>
           ctx.slots.register({ name: 'plugins.row.config', key: ROW_KEY, locale: NS }, (props) =>
             props.view === 'summary' ? props.t('summary') : h(PeerLinkPage, props),

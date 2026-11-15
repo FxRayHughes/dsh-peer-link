@@ -5,6 +5,7 @@ import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { API_PREFIX, BODY_LIMIT, buildAllowList, NonceCache, normalizeIp, parseHint, PeerError, signResponse, verify } from './protocol.js';
 import { decodeCode } from './state.js';
+import { listDir, readFileBytes, statPath } from './remote-files.js';
 
 /**
  * LAN endpoint of the peer-link plugin. It accepts signed requests from paired
@@ -95,6 +96,54 @@ export class SessionOps {
       web: this.web?.available() ?? false,
       relay: this.state.relay !== undefined,
     };
+  }
+
+  /**
+   * Whether `path` is inside `allowedRoots` (always true when none are set).
+   * The same fence the peer's working directories get.
+   */
+  inRoots(path) {
+    const roots = String(this.getConfig().allowedRoots ?? '')
+      .split(/[\n;]+/)
+      .map((root) => root.trim())
+      .filter(Boolean);
+    if (roots.length === 0) return true;
+    const win = platform() === 'win32';
+    const norm = (p) => (win ? p.toLowerCase().replace(/\//g, '\\') : p).replace(/[\\/]+$/, '');
+    const target = norm(path);
+    return roots.some((root) => target === norm(root) || target.startsWith(norm(root) + (win ? '\\' : '/')));
+  }
+
+  /** Base directory for a relative path: the given Session's workspace. */
+  async fileBase(args) {
+    if (typeof args?.sessionId !== 'string' || !args.sessionId) return undefined;
+    try {
+      return (await this.resolveAgent(args.sessionId)).session.header?.cwd;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async fileArgs(args) {
+    const out = { ...args, base: await this.fileBase(args) };
+    if (out.path) {
+      const meta = { path: isAbsolute(String(out.path)) ? String(out.path) : out.base ? `${out.base}/${out.path}` : String(out.path) };
+      if (isAbsolute(meta.path) && !this.inRoots(meta.path)) throw new PeerError('FORBIDDEN', 'path is outside the allowed roots on this machine', 403);
+    }
+    return out;
+  }
+
+  /** Files on this machine for a peer's preview and downloads (read-only). */
+  async filesList(args) {
+    return listDir(await this.fileArgs(args));
+  }
+
+  async filesStat(args) {
+    return statPath(await this.fileArgs(args));
+  }
+
+  async filesRead(args) {
+    return readFileBytes(await this.fileArgs(args));
   }
 
   /** One-time entry link to this machine's Web page; see web-share.js. */
@@ -365,7 +414,7 @@ export class SessionOps {
   }
 }
 
-const OPS = new Set(['info', 'hello', 'run', 'status', 'wait', 'cancel', 'sessions', 'read', 'webTicket']);
+const OPS = new Set(['info', 'hello', 'run', 'status', 'wait', 'cancel', 'sessions', 'read', 'webTicket', 'filesList', 'filesStat', 'filesRead']);
 
 /**
  * Start the LAN listener; resolves to `{ close, address }`. `/peer/*` is the

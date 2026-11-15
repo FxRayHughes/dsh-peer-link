@@ -88,7 +88,9 @@ function send(res, page) {
 
 /** Request headers as the local DSH listener should see them; `ns` is WebShare.cookieNs(). */
 function rewriteHeaders(headers, upstream, ns) {
-  const out = { ...headers, host: upstream.host };
+  // Tells DSH plugins the browser is on another machine (see remote-files.js);
+  // a browser cannot set it on its own, the relay overwrites it.
+  const out = { ...headers, host: upstream.host, 'x-dsh-remote-viewer': 'peer-link' };
   if (out.origin) out.origin = upstream.origin;
   if (out.referer) {
     try {
